@@ -1,0 +1,9 @@
+# Platzhalter fuer das Volume /app/data aus der compose.yaml.
+#
+# Nur fuer die CLI im Container. Der Container laeuft als uid 10001, deshalb
+# braucht das Zurueckschreiben auf den Host den --user-Schalter:
+#   docker compose exec --user "$(id -u):$(id -g)" inlayer \
+#     python inlayer.py -i data/figur.stl -o data/inlay.stl
+#
+# Die Web-App liest dieses Verzeichnis nicht — dort laufen Dateien ueber den
+# Upload-Dialog rein und den Download-Button raus.

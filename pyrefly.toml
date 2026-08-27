@@ -1,0 +1,6 @@
+# Bewusst ohne python-interpreter-path: der Pfad ist maschinenspezifisch und
+# hat als Windows-Pfad (.venv/Scripts/python.exe) jede Pruefung unter Linux und
+# im Container mit "missing-import" fluten lassen. Ohne Eintrag nimmt pyrefly
+# den aktiven Interpreter, was in jeder aktivierten venv das Richtige tut.
+# Fuer eine abweichende lokale Umgebung: pyrefly check --python-interpreter-path <exe>
+project-includes = ["*.py", "tests/*.py"]

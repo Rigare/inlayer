@@ -1,0 +1,28 @@
+services:
+  inlayer:
+    build:
+      context: .
+      # The runtime stage explicitly – not the test stage from the Dockerfile.
+      target: runtime
+    ports:
+      - "8501:8501"
+    volumes:
+      # Only for the CLI inside the container (docker compose exec ... -i data/figure.stl).
+      # The web app takes files through the upload dialog and hands the result
+      # back through the download button; it never reads this directory.
+      #
+      # The container runs as uid 10001. Reading from the mount works, but
+      # writing back requires `--user "$(id -u):$(id -g)"` on the exec call
+      # (see README) – otherwise permission denied on the host directory.
+      - ./data:/app/data
+    environment:
+      # Start Streamlit without opening a browser
+      - STREAMLIT_SERVER_HEADLESS=true
+      # Maximum upload size per file in MB. Without a value the default from
+      # .streamlit/config.toml (250) applies. Overridable on the host, e.g.
+      # `STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500 docker compose up` or via .env.
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=${STREAMLIT_SERVER_MAX_UPLOAD_SIZE:-250}
+      # Startup language of this instance. Without a value the app starts in
+      # English; it can still be switched per session in the sidebar.
+      - INLAYER_LANG=de
+    restart: unless-stopped

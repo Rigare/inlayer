@@ -1,0 +1,39 @@
+# Laufzeit-Abhaengigkeiten (Pipeline + Web-App).
+# Test-Werkzeuge stehen in requirements-dev.txt.
+#
+# Hinweis: Python 3.13 ist zwingend – manifold3d und pymeshfix haben (noch)
+# keine Wheels fuer 3.14.
+#
+# Exakt gepinnt, weil der Deploy-Workflow bei jedem Push nach main neu baut:
+# ohne Pins entscheidet der Zeitpunkt des Builds, welche Versionen in
+# Produktion landen. Die Staende unten sind auf python:3.13-slim aufgeloest
+# und mit gruener Testsuite verifiziert.
+#
+# Aktualisieren (im Container, damit es die Ziel-Plattform trifft):
+#   docker run --rm -v "$PWD/requirements.txt:/req.txt:ro" python:3.13-slim \
+#     sh -c "pip install -q -r /req.txt && pip freeze"
+# Danach `docker build --target test .` – die Teststage muss gruen bleiben.
+
+numpy==2.5.2
+scipy==1.18.1
+
+# trimesh 4.x: marching_cubes wendet den Grid-Transform nicht an (siehe AGENTS.md);
+# der Code kompensiert das manuell (_grid_to_mesh) und ist damit an die 4er-Major
+# gebunden. Ein Sprung auf 5.x braucht eine Pruefung dieser Kompensation.
+trimesh==4.12.2
+
+# Wird von trimesh nur lazy in matrix_to_marching_cubes importiert und daher
+# nicht als trimesh-Dependency mitinstalliert – ohne skimage schlaegt jeder
+# Voxel-Schritt fehl. Deshalb explizit hier.
+scikit-image==0.26.0
+
+# CSG-Engine: build_inlay ruft trimesh.boolean.* mit engine='manifold' auf.
+manifold3d==3.5.2
+
+# Mesh-Reparatur bzw. Dezimierung in prepare_figure.
+pymeshfix==0.18.1
+fast_simplification==0.2.0
+
+# Web-App (nur fuer `streamlit run app.py`, nicht fuer die CLI noetig).
+streamlit==1.62.0
+plotly==6.9.0

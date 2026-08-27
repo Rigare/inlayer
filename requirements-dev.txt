@@ -1,0 +1,9 @@
+# Entwicklungs-/Testabhaengigkeiten.
+# Installation: pip install -r requirements.txt -r requirements-dev.txt
+#
+# Gepinnt aus demselben Grund wie requirements.txt: die Teststage im Dockerfile
+# baut bei jedem Deploy neu.
+
+-r requirements.txt
+
+pytest==9.1.1

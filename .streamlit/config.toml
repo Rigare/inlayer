@@ -1,0 +1,11 @@
+[theme]
+# The custom CSS in app.py (metric cards, badges) is tuned for dark colours -
+# the theme is pinned to dark so light-mode clients do not break.
+base = "dark"
+
+[server]
+# Maximum upload size per file in MB (Streamlit's own default would be 200).
+# Overridable without touching this file:
+#   environment variable: STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500
+#   startup parameter:    streamlit run app.py --server.maxUploadSize=500
+maxUploadSize = 250
