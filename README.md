@@ -421,7 +421,7 @@ sidebar).
 
 Inlayer is the joint work of two developers:
 
-- **Marco Wittwer** — geometry pipeline and architecture: voxel processing,
+- **[Marco Wittwer](https://github.com/Rigare)** — geometry pipeline and architecture: voxel processing,
   tolerance dilation, boolean construction of the inlay via `manifold3d`, the 3D
   wall thickness check, parallelisation, and the container/CI setup.
 - **[Mirko Wittwer](https://github.com/Mirko-Wittwer)** — web app and multi-figure handling: the Streamlit interface
