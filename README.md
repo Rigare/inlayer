@@ -20,6 +20,14 @@ cavities — ready for FDM printing. Multiple figures are arranged automatically
 without collisions. Usable both as an interactive **web app** (Streamlit) and
 from the **command line**. The interface is available in **English and German**.
 
+<div align="center">
+  <h2>🎨 Interactive web app</h2>
+  <img src="https://github.com/user-attachments/assets/3f8b6820-f730-4bec-bcbb-6bf717793085" width="800" alt="Web App">
+  <p><i>The interactive real-time 3D preview.</i></p>
+</div>
+
+
+
 ## ⚡ Quickstart
 
 <details open>
@@ -414,6 +422,20 @@ sidebar).
 - **Repair only when needed:** `prepare_figure` skips `pymeshfix` when the loaded mesh is already watertight **and** consistently wound — the normal case for cleanly exported STLs. That halves the step's runtime (measured 1.99 s → 1.08 s at 82k triangles) and does not change the geometry. Watertightness alone is not a sufficient criterion: a mesh with inverted faces is watertight but would corrupt the subsequent voxel fill.
 - **Wall thickness tolerance:** `wall_thickness_stats_3d` tolerates 0.1 mm below target to account for voxel discretisation.
 - **Wall check without voxelising the inlay:** `build_inlay` builds the cavity grid (`inlay.metadata["cavity_grid"]`) directly from the subtracted figures. `wall_thickness_stats_3d` uses that grid and no longer has to voxelise the finished inlay itself — which saved double-digit gigabytes of RAM and several minutes of runtime on large figures. The old voxel path remains as a fallback only for inlays without this metadata (e.g. STLs loaded directly).
+
+---
+
+## 👁️ Screenshots
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/979448e3-dbfa-481b-902a-7efe8915d6be" width="48%" />
+  <img src="https://github.com/user-attachments/assets/325f4219-f273-43b2-8b89-81220c303186" width="48%" />
+  <br>
+  <img src="https://github.com/user-attachments/assets/3f8b6820-f730-4bec-bcbb-6bf717793085" width="48%" />
+  <img src="https://github.com/user-attachments/assets/ea2aeed4-dd56-4c55-a402-84188cc80b7b" width="48%" />
+  <br>
+  <img src="https://github.com/user-attachments/assets/0a7db16c-bc64-496c-8800-35018fbd05fe" width="48%" />
+</p>
 
 ---
 
