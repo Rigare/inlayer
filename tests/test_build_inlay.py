@@ -454,6 +454,136 @@ class TestBuildInlayFingerRecesses:
         with pytest.raises(ValueError):
             Config(enable_finger_recesses=True, finger_recess_z_offset=-1.0)
 
+    @staticmethod
+    def _recess_centres(inlay, cross_axis):
+        """Centres of the two recess hemispheres along the given axis."""
+        return [
+            float(hemi.bounds.mean(axis=0)[cross_axis])
+            for hemi in inlay.metadata["finger_recesses"]
+        ]
+
+    def test_recess_position_slides_recesses_along_the_figure(self, dilated_cube):
+        """finger_recess_position moves the pair along the figure, not deeper.
+
+        The shift is relative to the usable half length (half the figure's
+        extent across the recess axis, minus the recess radius), so +1.0 lands
+        exactly one radius short of the figure's end.
+        """
+        r = 1.5
+        base = dict(
+            voxel_pitch=1.0,
+            enable_finger_recesses=True,
+            finger_radius=r,
+            wall_thickness=4.0,
+        )
+        inlay_centre, _, _, h = inlayer.build_inlay(dilated_cube, Config(**base))
+        inlay_shifted, _, _, h_shifted = inlayer.build_inlay(
+            dilated_cube, Config(**base, finger_recess_position=1.0)
+        )
+
+        y_centre = self._recess_centres(inlay_centre, 1)
+        y_shifted = self._recess_centres(inlay_shifted, 1)
+        expected = dilated_cube.extents[1] / 2.0 - r
+        assert expected > 0.5  # the fixture has to leave room, otherwise the test is vacuous
+        for y0, y1 in zip(y_centre, y_shifted):
+            assert y1 - y0 == pytest.approx(expected, abs=1e-3)
+
+        # Both recesses move together and stay on the same cross coordinate
+        assert y_shifted[0] == pytest.approx(y_shifted[1], abs=1e-6)
+        # Sliding along the figure must not sink the recesses (that is z_offset's job)
+        assert h_shifted == pytest.approx(h, abs=1e-6)
+        for hemi in inlay_shifted.metadata["finger_recesses"]:
+            assert hemi.bounds[1][2] == pytest.approx(h_shifted, abs=1e-3)
+
+    def test_recess_position_is_symmetric_around_the_centre(self, dilated_cube):
+        """-p and +p mirror each other around the centred position."""
+        base = dict(
+            voxel_pitch=1.0,
+            enable_finger_recesses=True,
+            finger_radius=1.5,
+            wall_thickness=4.0,
+        )
+        centre = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base))[0], 1
+        )
+        plus = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base, finger_recess_position=0.5))[0], 1
+        )
+        minus = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base, finger_recess_position=-0.5))[0], 1
+        )
+        for c, p, m in zip(centre, plus, minus):
+            assert p > c > m
+            assert p - c == pytest.approx(c - m, abs=1e-3)
+
+    def test_recess_position_stays_inside_the_figure_footprint(self, dilated_cube):
+        """At +1.0 the hemisphere still sits within the figure's cross extent.
+
+        The box is only padded by finger_radius along the recess axis, so a
+        recess wandering past the figure across that axis would cut into the
+        side wall.
+        """
+        r = 1.5
+        inlay, w, d, h = inlayer.build_inlay(
+            dilated_cube,
+            Config(
+                voxel_pitch=1.0,
+                enable_finger_recesses=True,
+                finger_radius=r,
+                wall_thickness=4.0,
+                finger_recess_position=1.0,
+            ),
+        )
+        # Figure and box share their centre in Y; the cavity reaches
+        # dilated_cube.extents[1] / 2 to either side of it.
+        centre_y = d / 2.0
+        fig_max_y = centre_y + dilated_cube.extents[1] / 2.0
+        for hemi in inlay.metadata["finger_recesses"]:
+            assert hemi.bounds[1][1] <= fig_max_y + 1e-6
+
+    def test_recess_position_ignored_for_short_figures(self, dilated_cube):
+        """A figure shorter than 2 x finger_radius keeps its centred recesses."""
+        r = float(dilated_cube.extents[1])  # far larger than the figure's half extent
+        base = dict(
+            voxel_pitch=1.0,
+            enable_finger_recesses=True,
+            finger_radius=r,
+            wall_thickness=4.0,
+        )
+        centre = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base))[0], 1
+        )
+        shifted = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base, finger_recess_position=1.0))[0], 1
+        )
+        assert shifted == pytest.approx(centre, abs=1e-6)
+
+    def test_recess_position_follows_the_axis(self, dilated_cube):
+        """With axis 'y' the position slides the recesses along X instead."""
+        base = dict(
+            voxel_pitch=1.0,
+            enable_finger_recesses=True,
+            finger_radius=1.5,
+            finger_recess_axis="y",
+            wall_thickness=4.0,
+        )
+        centre = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base))[0], 0
+        )
+        shifted = self._recess_centres(
+            inlayer.build_inlay(dilated_cube, Config(**base, finger_recess_position=0.8))[0], 0
+        )
+        for c, s in zip(centre, shifted):
+            assert s > c
+
+    def test_recess_position_validation(self):
+        """finger_recess_position only accepts values in [-1.0, 1.0]."""
+        for good in (-1.0, 0.0, 0.25, 1.0):
+            Config(enable_finger_recesses=True, finger_recess_position=good)
+        for bad in (-1.01, 1.5, 42.0):
+            with pytest.raises(ValueError):
+                Config(enable_finger_recesses=True, finger_recess_position=bad)
+
 
 
 

@@ -70,8 +70,14 @@ class Config:
     layout_style: str = "compact"
     enable_finger_recesses: bool = False
     finger_radius: float = 8.0
-    finger_recess_axis: str = "x"  # "x" (links/rechts) oder "y" (vorne/hinten)
-    finger_recess_z_offset: float = 0.0  # Absenkung der Mulden unter die Box-Oberkante
+    finger_recess_axis: str = "x"  # "x" (left/right) or "y" (front/back)
+    finger_recess_z_offset: float = 0.0  # how far the recesses sit below the box's top edge
+    # Position of the recess pair *along* the figure (the axis perpendicular to
+    # finger_recess_axis), as a fraction of the usable half length: -1.0 = one
+    # end, 0.0 = centre (default), 1.0 = the other end. Relative rather than
+    # absolute in mm so one setting fits figures of different sizes and can
+    # never push a recess off the figure.
+    finger_recess_position: float = 0.0
     enable_parallel: bool = False
 
     def __post_init__(self) -> None:
@@ -85,6 +91,10 @@ class Config:
         if self.finger_recess_z_offset < 0:
             raise ValueError(
                 t_("config.must_be_positive", name="finger_recess_z_offset", value=self.finger_recess_z_offset)
+            )
+        if not -1.0 <= self.finger_recess_position <= 1.0:
+            raise ValueError(
+                t_("config.bad_finger_position", value=self.finger_recess_position)
             )
         if self.clearance < 0:
             raise ValueError(t_("config.must_be_positive", name="clearance", value=self.clearance))
@@ -144,14 +154,15 @@ MAX_PARALLEL_WORKERS: Final[int] = 4
 
 # --- Fingermulden -----------------------------------------------------------
 
-# Die Muldenposition wird aus den Vertices nahe der Y-Mitte der Figur bestimmt
-# (dort, wo die Finger tatsaechlich zugreifen). Die Breite dieses Suchbands ist
-# ein Kompromiss: zu schmal -> bei grobem voxel_pitch liegen kaum Vertices darin
-# und die Position wird von der Voxel-Diskretisierung verrauscht; zu breit -> es
-# fliessen Vertices weit ausserhalb der Greifzone ein und die Mulden wandern nach
-# aussen (gemessen an einem Kegel: Band 0.8 mm -> 26.4 mm Breite, 8.0 mm -> 35.2 mm).
-# Daher relativ zum voxel_pitch, mit Untergrenze, damit immer mehrere
-# Voxelschichten erfasst werden.
+# The recess position is derived from the vertices near the grip position along
+# the cross axis (by default the figure's centre, moved by
+# Config.finger_recess_position) - that is where the fingers actually reach in.
+# The width of that search band is a compromise: too narrow -> at a coarse
+# voxel_pitch barely any vertices fall inside and the position gets noisy from
+# the voxel discretization; too wide -> vertices far outside the grip zone are
+# pulled in and the recesses drift outwards (measured on a cone: band 0.8 mm ->
+# 26.4 mm width, 8.0 mm -> 35.2 mm). Hence relative to voxel_pitch, with a lower
+# bound so several voxel layers are always covered.
 FINGER_BAND_VOXELS: Final[float] = 5.0
 FINGER_BAND_MIN_MM: Final[float] = 2.0
 
@@ -859,50 +870,64 @@ def build_inlay(
         if min_w_i < (config.wall_thickness - 0.1):
             violating_indices.append(i)
 
-        # Fingermulden-Zylinder generieren
+        # Generate the finger recess bodies
         if config.enable_finger_recesses and recess_template is not None:
-            # Ermittle die tatsächlichen globalen Kanten-Grenzen des bereits platzierten (und ggf. rotierten) Modells nahe seiner Mitte.
-            # Die Achse, entlang derer die Mulden liegen, steuert config.finger_recess_axis:
-            # "x" -> links/rechts (Daumen + Finger greifen von den Seiten),
-            # "y" -> vorne/hinten (natuerliche Handhaltung von vorn/hinten).
+            # Determine the real silhouette edges of the already placed (and
+            # possibly rotated) model at the grip position.
+            # config.finger_recess_axis picks the axis the recesses lie on:
+            # "x" -> left/right (thumb and fingers grip from the sides),
+            # "y" -> front/back (natural hand position).
             axis = 0 if config.finger_recess_axis == "x" else 1
             cross = 1 - axis
             global_min, global_max = None, None
             c_placed = fb_placed.mean(axis=0)
             verts = fig.vertices
 
-            # Finde Vertices nahe der Mitte des platzierten Modells entlang der
-            # Querachse. Bandbreite skaliert mit dem voxel_pitch (siehe
-            # FINGER_BAND_VOXELS), damit bei grober Aufloesung genug Vertices
-            # erfasst werden.
+            # Where along the figure the pair of recesses sits (cross axis).
+            # finger_recess_position is relative to the usable half length, so
+            # the same setting works for figures of different sizes. Subtracting
+            # the recess radius keeps the hemisphere inside the figure's own
+            # footprint, hence away from the box walls, even at +/-1.0. For a
+            # figure shorter than 2 * finger_radius the span collapses to 0 and
+            # the recesses stay centred.
+            half_span = max(
+                0.0,
+                (fb_placed[1][cross] - fb_placed[0][cross]) / 2.0 - config.finger_radius,
+            )
+            grip_cross = float(c_placed[cross] + config.finger_recess_position * half_span)
+
+            # Collect the vertices near that grip position along the cross axis.
+            # The band width scales with voxel_pitch (see FINGER_BAND_VOXELS) so
+            # a coarse resolution still yields enough vertices.
             band = max(FINGER_BAND_MIN_MM, FINGER_BAND_VOXELS * config.voxel_pitch)
-            close_verts = verts[np.abs(verts[:, cross] - c_placed[cross]) < band]
+            close_verts = verts[np.abs(verts[:, cross] - grip_cross) < band]
             if len(close_verts) > 0:
                 global_min = float(close_verts[:, axis].min())
                 global_max = float(close_verts[:, axis].max())
 
-            # Fallback auf globale Bounds der platzierten Figur
+            # Fallback to the global bounds of the placed figure (an empty band
+            # is possible when the figure has a gap at the chosen position)
             if global_min is None or global_max is None:
                 global_min = float(fb_placed[0][axis])
                 global_max = float(fb_placed[1][axis])
 
-            # Halbkugel-Template (oben offen, Radius = finger_radius) kopieren
+            # Copy the hemisphere template (open at the top, radius = finger_radius)
             cyl_a = recess_template.copy()
             cyl_b = recess_template.copy()
 
-            # Positionen auf Höhe der Box-Oberkante, abgesenkt um den Z-Offset
+            # Placed at the box's top edge, lowered by the Z offset
             z_pos = box_h - config.finger_recess_z_offset
             pos_a = [0.0, 0.0, z_pos]
             pos_b = [0.0, 0.0, z_pos]
             pos_a[axis] = global_min
             pos_b[axis] = global_max
-            pos_a[cross] = c_placed[cross]
-            pos_b[cross] = c_placed[cross]
+            pos_a[cross] = grip_cross
+            pos_b[cross] = grip_cross
 
             cyl_a.apply_translation(pos_a)
             cyl_b.apply_translation(pos_b)
 
-            # Speichere in Metadaten zur Identifizierung in der Vorschau
+            # Tag them so the preview can identify the recesses
             cyl_a.metadata["type"] = "finger_recess"
             cyl_a.metadata["fig_idx"] = i
             cyl_b.metadata["type"] = "finger_recess"
@@ -1230,6 +1255,10 @@ if __name__ == "__main__":
         help=t_("cli.finger_recess_z_offset", default=Config.finger_recess_z_offset)
     )
     parser.add_argument(
+        "--finger-recess-position", type=float, default=Config.finger_recess_position,
+        help=t_("cli.finger_recess_position", default=Config.finger_recess_position)
+    )
+    parser.add_argument(
         "--parallel", action="store_true",
         help=t_("cli.parallel", workers=MAX_PARALLEL_WORKERS)
     )
@@ -1257,6 +1286,7 @@ if __name__ == "__main__":
         finger_radius=args.finger_radius,
         finger_recess_axis=args.finger_recess_axis,
         finger_recess_z_offset=args.finger_recess_z_offset,
+        finger_recess_position=args.finger_recess_position,
         enable_parallel=args.parallel,
     )
 

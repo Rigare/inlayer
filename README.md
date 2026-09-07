@@ -183,7 +183,7 @@ The web app is a full GUI with live preview:
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
 | 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box |
 | 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z |
-| 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius) |
+| 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis, depth and position along the figure) |
 | ⚡ **Multi-threading** | Optionally process several figures in parallel across CPU cores (checkbox in the sidebar) |
 | 📐 **Box overrides** | Optionally force fixed box dimensions |
 | 🔍 **3D wall thickness check** | Automatic check with colour-coded warnings, stat cards and a pointer to the affected figures |
@@ -218,6 +218,9 @@ python inlayer.py -i figure.stl -o inlay.stl --finger-recesses --finger-radius 8
 
 # Recesses front/back (natural hand position), lowered by 5 mm
 python inlayer.py -i figure.stl -o inlay.stl --finger-recesses --finger-recess-axis y --finger-recess-z-offset 5.0
+
+# Recesses moved along the figure towards +Y (e.g. to grip it at the shoulders)
+python inlayer.py -i figure.stl -o inlay.stl --finger-recesses --finger-recess-position 0.6
 
 # Process several figures in parallel across CPU cores
 python inlayer.py -i fig1.stl fig2.stl fig3.stl -o inlay.stl --parallel
@@ -371,14 +374,25 @@ sidebar).
 | `finger_radius` / `--finger-radius` | 8.0 mm | Radius of the recesses (web-app slider: 5–15 mm) |
 | `finger_recess_axis` / `--finger-recess-axis` | `x` | Axis of the recesses: `x` (left/right) or `y` (front/back, natural hand position) |
 | `finger_recess_z_offset` / `--finger-recess-z-offset` | 0.0 mm | How far the recesses sit below the box's top edge (e.g. to touch only the cap on keycaps) |
+| `finger_recess_position` / `--finger-recess-position` | 0.0 | Position of the recesses **along** the figure, `-1.0` … `1.0` (`0.0` = centre; web-app slider: −100 … +100 %) |
 
 > With finger recesses enabled the box grows by `2 × finger_radius` along the
 > recess axis, so the recesses lie entirely within the box walls.
 
-> The recesses are placed where the figure is widest near its centre (across the
-> recess axis). The width of that search band scales with `voxel_pitch`
+> The recesses are placed where the figure is widest at the grip position (across
+> the recess axis). The width of that search band scales with `voxel_pitch`
 > (`FINGER_BAND_VOXELS`, at least `FINGER_BAND_MIN_MM`), so the position is not
 > made noisy by voxel discretisation at coarse resolutions.
+
+> `finger_recess_position` slides both recesses along the figure — perpendicular
+> to `finger_recess_axis` — to pick the best grip point (shoulders instead of
+> waist, cap instead of stem). It is relative rather than absolute in mm, so one
+> setting fits figures of different sizes: `±1.0` puts the recesses one
+> `finger_radius` short of the figure's end, which keeps the hemispheres inside
+> the figure's own footprint and therefore clear of the box walls. Figures
+> shorter than `2 × finger_radius` along that axis stay centred. Use
+> `finger_recess_z_offset` when the recesses should sit *deeper*, and
+> `finger_recess_position` when they should sit *elsewhere along* the figure.
 
 ### Language (optional)
 

@@ -255,6 +255,7 @@ enable_finger_recesses = st.sidebar.checkbox(
 finger_radius = 8.0
 finger_recess_axis = "x"
 finger_recess_z_offset = 0.0
+finger_recess_position = 0.0
 if enable_finger_recesses:
     finger_radius = st.sidebar.slider(
         t("app.finger.radius.label"),
@@ -278,6 +279,16 @@ if enable_finger_recesses:
         step=0.5,
         help=t("app.finger.z_offset.help"),
     )
+    # Percent in the UI, fraction (-1.0 ... 1.0) in the Config - the slider is
+    # the more readable unit, the pipeline works relative to the half length.
+    finger_recess_position = st.sidebar.slider(
+        t("app.finger.position.label"),
+        min_value=-100,
+        max_value=100,
+        value=0,
+        step=5,
+        help=t("app.finger.position.help"),
+    ) / 100.0
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.performance.heading"))
@@ -625,7 +636,7 @@ def _params_snapshot() -> dict:
         "box": (box_shape, box_width, box_depth, box_height, box_diameter),
         "figure_gap": figure_gap,
         "layout_style": layout_style,
-        "finger": (enable_finger_recesses, finger_radius if enable_finger_recesses else None, finger_recess_axis if enable_finger_recesses else None, finger_recess_z_offset if enable_finger_recesses else None),
+        "finger": (enable_finger_recesses, finger_radius if enable_finger_recesses else None, finger_recess_axis if enable_finger_recesses else None, finger_recess_z_offset if enable_finger_recesses else None, finger_recess_position if enable_finger_recesses else None),
         "per_fig": per_fig,
     }
 
@@ -693,6 +704,7 @@ if run_btn:
             finger_radius=finger_radius,
             finger_recess_axis=finger_recess_axis,
             finger_recess_z_offset=finger_recess_z_offset,
+            finger_recess_position=finger_recess_position,
             enable_parallel=enable_parallel,
         )
 
