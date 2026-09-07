@@ -7,6 +7,7 @@
     <code>upload STL → compute inlay → print</code>
   </p>
   <p align="center">
+    <a href="https://github.com/Rigare/inlayer/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/Rigare/inlayer/actions/workflows/tests.yml/badge.svg?branch=main"></a>
     <a href="LICENSE"><img alt="License: AGPL v3" src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg"></a>
     <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-blue.svg">
     <img alt="UI: English or German" src="https://img.shields.io/badge/UI-English%20%7C%20Deutsch-blue.svg">
@@ -267,6 +268,19 @@ Slow-marked tests spawn subprocesses and run the full pipeline on cube and
 sphere fixtures. `tests/test_app_render.py` renders `app.py` through Streamlit's
 `AppTest` in both languages, which is what makes the otherwise unimportable
 frontend testable.
+
+### Continuous integration
+
+`.github/workflows/tests.yml` runs on every pull request and on every push to
+`main`, so the result shows up as a check on the pull request:
+
+| Job | What it does | Why |
+|---|---|---|
+| `pytest (Python 3.13)` | Installs `requirements-dev.txt` on a plain runner and runs the suite | Fast feedback (~1 min) |
+| `Docker test stage` | `docker build --target test .` | Runs the same suite inside the pinned `python:3.13-slim` image — the only place a broken version pin or a source file missing from the Dockerfile's `COPY` list shows up |
+
+Runs on the same branch supersede each other, so an outdated commit does not
+keep a runner busy.
 
 ---
 

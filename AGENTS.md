@@ -11,7 +11,7 @@ High-signal context for OpenCode sessions in this repo.
 
 - **Python 3.13 strictly required.** `manifold3d` and `pymeshfix` have no wheels for 3.14 yet.
 - Runtime deps live in `requirements.txt`, test-only deps in `requirements-dev.txt` (which includes the former via `-r`). `scikit-image` is a runtime dep despite never being imported directly: `trimesh` imports it lazily inside `matrix_to_marching_cubes`, so pip won't pull it in on its own. Don't "clean it up".
-- No linters or build system are configured. Do not invent them unless asked.
+- No linters or build system are configured. Do not invent them unless asked. `pyrefly.toml` is checked in for local type checks (`pyrefly check`), but it is deliberately **not** part of CI — keep it that way unless asked.
 - **The runtime image must ship `.streamlit/config.toml`.** The Dockerfile copies files individually (not `COPY . .`), and the pinned dark theme lives in that file. Without it the container falls back to the light theme while the custom CSS in `app.py` stays dark-tuned — sidebar labels then render unreadable. Any new file the app reads at runtime has to be added to the `runtime` stage explicitly.
 
 ## Testing
@@ -21,6 +21,7 @@ High-signal context for OpenCode sessions in this repo.
 - **After every code change, run the tests.** If the suite fails, fix the regression before considering the change done.
 - **Extend the suite when you add or modify behavior.** New functions, new branches, new edge cases or bug fixes must come with matching tests. Keep test docstrings and comments in English per the language convention below.
 - Shared fixtures (cube/sphere STL, fast config) live in `tests/conftest.py` — reuse them instead of regenerating geometry.
+- **CI is `.github/workflows/tests.yml`** (pull requests and pushes to `main`): one job runs `pytest` on a plain runner with Python 3.13, a second builds `docker build --target test .`. The Docker job is not redundant — it is what catches a version pin that no longer resolves on `python:3.13-slim` and a new source file missing from the Dockerfile's explicit `COPY` list. Adding a source file therefore means touching the Dockerfile in the same change, or CI goes red. The pytest job deliberately installs no apt packages: no runtime wheel links against libGL or libglib (checked with `ldd`), the Dockerfile needs them only because the slim image ships with almost nothing.
 
 ## Language convention
 
