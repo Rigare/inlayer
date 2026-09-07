@@ -1,0 +1,65 @@
+# Runs the test suite on GitHub so its result is visible as a check on every
+# pull request. Two jobs on purpose:
+#
+#   pytest  - fast feedback on a plain runner (~1 min).
+#   docker  - the same suite inside the pinned python:3.13-slim image, which is
+#             the deploy path. It is the only place that catches a broken
+#             version pin from requirements.txt or a new source file missing
+#             from the Dockerfile's explicit COPY list (see AGENTS.md).
+#
+# No apt step in the pytest job: none of the runtime wheels link against libGL
+# or libglib, the Dockerfile installs those only because python:3.13-slim ships
+# with almost nothing.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes the previous run on the same ref; no point in paying
+# for CI on a commit nobody will look at any more.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (Python 3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # Python 3.13 exactly: manifold3d and pymeshfix have no wheels for 3.14,
+      # and the requirements are pinned against 3.13.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: pytest
+
+  docker:
+    name: Docker test stage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # The test stage runs pytest during the build: a red test fails the build.
+      - name: Build test stage
+        run: docker build --target test .
