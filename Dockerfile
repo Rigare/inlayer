@@ -16,15 +16,22 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-# --- Teststage --------------------------------------------------------------
-# Laeuft die Suite waehrend des Builds; ein roter Test bricht den Build ab.
-# Nicht Teil von `runtime`, tests/ landen also nie im Deploy-Image.
+# --- Test stage -------------------------------------------------------------
+# Runs the suite during the build; a red test fails the build.
+# Not part of `runtime`, so tests/ never end up in the deploy image.
 FROM base AS test
 
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY pytest.ini inlayer.py app.py app_helpers.py i18n.py ./
 COPY tests/ ./tests/
+# tests/test_streamlit_config.py reads both of these: the config whose theme and
+# upload limit it pins down, and the Dockerfile itself to verify the runtime
+# stage's COPY line. Without them four tests fail inside the image only - which
+# is exactly the drift the containerised run is meant to catch.
+# `.dockerignore` keeps the Dockerfile in the context for this reason.
+COPY .streamlit/ ./.streamlit/
+COPY Dockerfile ./
 RUN python -m pytest -q
 
 
