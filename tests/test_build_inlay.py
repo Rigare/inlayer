@@ -585,5 +585,77 @@ class TestBuildInlayFingerRecesses:
                 Config(enable_finger_recesses=True, finger_recess_position=bad)
 
 
+class TestBuildInlayIndividualRecessPositions:
+    """Per-figure grip positions: one inlay, one setting per figure."""
+
+    CFG = dict(
+        voxel_pitch=1.0,
+        enable_finger_recesses=True,
+        finger_radius=1.5,
+        wall_thickness=4.0,
+    )
+
+    @staticmethod
+    def _by_figure(inlay, cross_axis=1):
+        """Recess centres along cross_axis, grouped by the figure they belong to."""
+        grouped: dict[int, list[float]] = {}
+        for hemi in inlay.metadata["finger_recesses"]:
+            grouped.setdefault(hemi.metadata["fig_idx"], []).append(
+                float(hemi.bounds.mean(axis=0)[cross_axis])
+            )
+        return grouped
+
+    def test_each_figure_gets_its_own_position(self, dilated_cube, dilated_sphere):
+        """Two figures, two different grip points in one inlay."""
+        figs = [dilated_cube, dilated_sphere]
+        arranged = inlayer.arrange_figures(figs, gap=4.0)
+        centred, *_ = inlayer.build_inlay(arranged, Config(**self.CFG))
+        mixed, *_ = inlayer.build_inlay(
+            arranged, Config(**self.CFG), individual_recess_positions=[1.0, 0.0]
+        )
+
+        centred_by_fig = self._by_figure(centred)
+        mixed_by_fig = self._by_figure(mixed)
+        # Figure 0 moved along its own Y extent, figure 1 stayed centred
+        for c, m in zip(centred_by_fig[0], mixed_by_fig[0]):
+            assert m > c + 0.5
+        assert mixed_by_fig[1] == pytest.approx(centred_by_fig[1], abs=1e-6)
+
+    def test_falls_back_to_the_config_value(self, dilated_cube):
+        """Figures without an entry keep Config.finger_recess_position."""
+        cfg = Config(**self.CFG, finger_recess_position=1.0)
+        from_config, *_ = inlayer.build_inlay(dilated_cube, cfg)
+        # An empty list leaves index 0 uncovered, so the config value applies
+        from_empty, *_ = inlayer.build_inlay(
+            dilated_cube, cfg, individual_recess_positions=[]
+        )
+        assert self._by_figure(from_empty)[0] == pytest.approx(
+            self._by_figure(from_config)[0], abs=1e-6
+        )
+
+    def test_individual_value_overrides_the_config_value(self, dilated_cube):
+        """The per-figure entry wins over the global default."""
+        cfg = Config(**self.CFG, finger_recess_position=1.0)
+        overridden, *_ = inlayer.build_inlay(
+            dilated_cube, cfg, individual_recess_positions=[0.0]
+        )
+        centred, *_ = inlayer.build_inlay(dilated_cube, Config(**self.CFG))
+        assert self._by_figure(overridden)[0] == pytest.approx(
+            self._by_figure(centred)[0], abs=1e-6
+        )
+
+    def test_out_of_range_entry_raises_before_the_csg_run(self, dilated_cube):
+        """A value outside [-1, 1] is rejected, not silently clamped."""
+        with pytest.raises(ValueError):
+            inlayer.build_inlay(
+                dilated_cube, Config(**self.CFG), individual_recess_positions=[1.5]
+            )
+
+    def test_accepts_the_keyword(self):
+        """The parameter is part of the public signature."""
+        params = inspect.signature(inlayer.build_inlay).parameters
+        assert "individual_recess_positions" in params
+
+
 
 

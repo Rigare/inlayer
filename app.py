@@ -219,6 +219,39 @@ multi_mode = len(uploaded_files) > 1
 if multi_mode:
     st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
 
+# Session state. Deliberately right after the upload instead of further down:
+# the finger recess controls above it in the sidebar already address individual
+# figures and need fig_names.
+fig_names = [uf.name for uf in uploaded_files] if uploaded_files else ["figur.stl"]
+if "fig_offsets_dict" not in st.session_state:
+    st.session_state["fig_offsets_dict"] = {}
+
+for name in fig_names:
+    if name not in st.session_state["fig_offsets_dict"]:
+        st.session_state["fig_offsets_dict"][name] = {}
+    for k, default_val in [
+        ("offset_x", 0.0), ("offset_y", 0.0), ("offset_z", 0.0),
+        ("rot_x", 0.0), ("rot_y", 0.0), ("rot_z", 0.0),
+        ("finger_recess_position", 0.0),
+    ]:
+        if k not in st.session_state["fig_offsets_dict"][name]:
+            st.session_state["fig_offsets_dict"][name][k] = default_val
+
+# A removed upload must not leave a dangling selection behind: Streamlit rejects
+# a session-state value that is not among a selectbox's options. The equivalent
+# reset for the position/rotation selections follows further down, next to them.
+if st.session_state.get("selected_recess_fig") not in [ALL_FIGURES] + fig_names:
+    st.session_state["selected_recess_fig"] = ALL_FIGURES
+
+
+def _fig_label(name: str) -> str:
+    """Label of a figure selection: sentinel translated, file names raw.
+
+    Defined this early because the finger recess selection above already
+    formats with it.
+    """
+    return t("app.all_figures") if name == ALL_FIGURES else name
+
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.printer.heading"))
 
@@ -246,6 +279,36 @@ scale = st.sidebar.number_input(
     t("app.scale.label"), min_value=0.01, max_value=100.0, value=1.0, step=0.1,
     help=t("app.scale.help"),
 )
+
+# --- Finger recesses: position per figure -----------------------------------
+# Widget key of the recess position. A single key (not one per figure), reloaded
+# whenever the figure selection changes - same approach as the manual offsets.
+RECESS_POS_KEY = "_sl_finger_recess_position"
+
+
+def _recess_percent(name: str) -> int:
+    """A figure's stored recess position as the slider's percent value."""
+    stored = st.session_state["fig_offsets_dict"].get(name, {}).get("finger_recess_position", 0.0)
+    return int(round(float(stored) * 100))
+
+
+def _store_recess_position():
+    """Writes the slider value to the currently selected figure(s)."""
+    value = float(st.session_state[RECESS_POS_KEY]) / 100.0
+    _, targets = app_helpers.recess_position_targets(
+        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
+    )
+    for name in targets:
+        st.session_state["fig_offsets_dict"][name]["finger_recess_position"] = value
+
+
+def _on_recess_fig_selected():
+    """Loads the newly selected figure's stored value into the slider."""
+    ref, _ = app_helpers.recess_position_targets(
+        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
+    )
+    st.session_state[RECESS_POS_KEY] = _recess_percent(ref)
+
 
 enable_finger_recesses = st.sidebar.checkbox(
     t("app.finger.enable.label"),
@@ -279,16 +342,41 @@ if enable_finger_recesses:
         step=0.5,
         help=t("app.finger.z_offset.help"),
     )
-    # Percent in the UI, fraction (-1.0 ... 1.0) in the Config - the slider is
+    # Position along the figure. Unlike radius, axis and depth this one is
+    # stored per figure: the best grip point follows the figure's shape, so one
+    # shared value is wrong as soon as two differently shaped models share an
+    # inlay. Same slider-plus-selection pattern as the manual offsets further
+    # down (store on change, load on selection change) - but with its own
+    # callbacks, because _axis_row quantizes in mm/degrees, which does not fit
+    # a relative position.
+    if len(fig_names) > 1:
+        st.sidebar.selectbox(
+            t("app.finger.position.select_fig"),
+            [ALL_FIGURES] + fig_names,
+            format_func=_fig_label,
+            key="selected_recess_fig",
+            on_change=_on_recess_fig_selected,
+        )
+    _recess_ref, _ = app_helpers.recess_position_targets(
+        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
+    )
+    if RECESS_POS_KEY not in st.session_state:
+        st.session_state[RECESS_POS_KEY] = _recess_percent(_recess_ref)
+
+    # Percent in the UI, fraction (-1.0 ... 1.0) in the pipeline - the slider is
     # the more readable unit, the pipeline works relative to the half length.
-    finger_recess_position = st.sidebar.slider(
+    st.sidebar.slider(
         t("app.finger.position.label"),
         min_value=-100,
         max_value=100,
-        value=0,
         step=5,
+        key=RECESS_POS_KEY,
+        on_change=_store_recess_position,
         help=t("app.finger.position.help"),
-    ) / 100.0
+    )
+    # No write-through outside the callback: with "all figures" selected that
+    # would overwrite every per-figure value on each rerun.
+    finger_recess_position = st.session_state[RECESS_POS_KEY] / 100.0
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.performance.heading"))
@@ -385,21 +473,6 @@ layout_style = st.sidebar.selectbox(
     help=t("app.layout.help")
 ) if multi_mode else "compact"
 
-# Session-State initialisieren
-fig_names = [uf.name for uf in uploaded_files] if uploaded_files else ["figur.stl"]
-if "fig_offsets_dict" not in st.session_state:
-    st.session_state["fig_offsets_dict"] = {}
-
-for name in fig_names:
-    if name not in st.session_state["fig_offsets_dict"]:
-        st.session_state["fig_offsets_dict"][name] = {}
-    for k, default_val in [
-        ("offset_x", 0.0), ("offset_y", 0.0), ("offset_z", 0.0),
-        ("rot_x", 0.0), ("rot_y", 0.0), ("rot_z", 0.0)
-    ]:
-        if k not in st.session_state["fig_offsets_dict"][name]:
-            st.session_state["fig_offsets_dict"][name][k] = default_val
-
 # Falls die ausgewählte Figur nicht mehr existiert, auf die erste zurücksetzen
 valid_fig_names = [ALL_FIGURES] + fig_names if len(fig_names) > 1 else fig_names
 if "selected_fig" in st.session_state and st.session_state["selected_fig"] not in valid_fig_names:
@@ -425,10 +498,6 @@ def _quantize_axis(axis: str, val: float) -> float:
 
 _selection_key = app_helpers.selection_key
 
-
-def _fig_label(name: str) -> str:
-    """Anzeigetext einer Figur-Auswahl: Sentinel uebersetzt, Dateinamen roh."""
-    return t("app.all_figures") if name == ALL_FIGURES else name
 
 def _store_axis_value(axis: str, val: float):
     """Quantisiert den Wert, spiegelt ihn in alle Widget-Keys und speichert ihn
@@ -624,6 +693,7 @@ def _params_snapshot() -> dict:
             if enable_manual_offsets else (0.0, 0.0, 0.0),
             (off.get("rot_x", 0.0), off.get("rot_y", 0.0), off.get("rot_z", 0.0))
             if enable_manual_rotations else (0.0, 0.0, 0.0),
+            off.get("finger_recess_position", 0.0) if enable_finger_recesses else 0.0,
         )
     return {
         "files": [(uf.name, uf.size) for uf in uploaded_files],
@@ -714,6 +784,7 @@ if run_btn:
         # Individuelle manuelle Offsets & Rotationen ermitteln
         individual_offsets = []
         individual_rotations = []
+        individual_recess_positions = []
         for name in file_names:
             if enable_manual_offsets:
                 off = st.session_state["fig_offsets_dict"].get(name, {})
@@ -726,6 +797,11 @@ if run_btn:
                 individual_rotations.append((off.get("rot_x", 0.0), off.get("rot_y", 0.0), off.get("rot_z", 0.0)))
             else:
                 individual_rotations.append((0.0, 0.0, 0.0))
+
+            off = st.session_state["fig_offsets_dict"].get(name, {})
+            individual_recess_positions.append(
+                float(off.get("finger_recess_position", 0.0)) if enable_finger_recesses else 0.0
+            )
 
         # Datei-Hashes einmal vorab berechnen (Cache-Keys, je Datei nur ein Read)
         file_hashes = [_file_hash(p) for p in input_paths]
@@ -801,6 +877,7 @@ if run_btn:
         t_step = logger.log(t("app.log.build"), t_step)
         inlay, actual_w, actual_d, actual_h = inlayer.build_inlay(
             fig_offsets, config, individual_offsets=individual_offsets,
+            individual_recess_positions=individual_recess_positions,
             stable_global_bounds=stable_global_bounds,
             file_names=file_names,
         )

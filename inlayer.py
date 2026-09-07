@@ -76,7 +76,8 @@ class Config:
     # finger_recess_axis), as a fraction of the usable half length: -1.0 = one
     # end, 0.0 = centre (default), 1.0 = the other end. Relative rather than
     # absolute in mm so one setting fits figures of different sizes and can
-    # never push a recess off the figure.
+    # never push a recess off the figure. This is the value for every figure;
+    # build_inlay's individual_recess_positions overrides it per figure.
     finger_recess_position: float = 0.0
     enable_parallel: bool = False
 
@@ -707,6 +708,7 @@ def build_inlay(
     individual_offsets: list[tuple[float, float, float]] | None = None,
     stable_global_bounds: tuple[np.ndarray, np.ndarray] | None = None,
     file_names: list[str] | None = None,
+    individual_recess_positions: list[float] | None = None,
 ) -> tuple[trimesh.Trimesh, float, float, float]:
     """Konstruiert die Box und fuehrt die Boolean-Differenz aus.
 
@@ -717,6 +719,12 @@ def build_inlay(
     (Zylinder). Beim Zylinder sind die zurueckgegebenen box_w und box_d beide
     gleich dem Durchmesser (Bounding-Box des Zylinders).
 
+    `individual_recess_positions` sets the finger recess position per figure
+    (same value range as `Config.finger_recess_position`); figures without an
+    entry fall back to the config value. Every other recess parameter (radius,
+    axis, Z offset) stays global - the grip point differs per figure, the hand
+    that reaches in does not.
+
     Hinweis: Rotationen sind zu diesem Zeitpunkt bereits in die uebergebenen
     Meshes eingerechnet (`apply_euler_rotation` laeuft in Schritt 1 der
     Pipeline). `build_inlay` dreht selbst nichts mehr.
@@ -724,6 +732,14 @@ def build_inlay(
     # Normalisieren: einzelnes Mesh → einelementige Liste
     if isinstance(figure_offsets, trimesh.Trimesh):
         figure_offsets = [figure_offsets]
+
+    # Validate up front: a value outside [-1, 1] would push a recess past the
+    # figure's footprint into a box wall, and failing after the CSG run would
+    # waste the whole build.
+    if individual_recess_positions is not None:
+        for value in individual_recess_positions:
+            if not -1.0 <= value <= 1.0:
+                raise ValueError(t_("config.bad_finger_position", value=value))
 
     for f in figure_offsets:
         if f.bounds is None or len(f.vertices) == 0:
@@ -894,7 +910,11 @@ def build_inlay(
                 0.0,
                 (fb_placed[1][cross] - fb_placed[0][cross]) / 2.0 - config.finger_radius,
             )
-            grip_cross = float(c_placed[cross] + config.finger_recess_position * half_span)
+            if individual_recess_positions is not None and i < len(individual_recess_positions):
+                recess_position = individual_recess_positions[i]
+            else:
+                recess_position = config.finger_recess_position
+            grip_cross = float(c_placed[cross] + recess_position * half_span)
 
             # Collect the vertices near that grip position along the cross axis.
             # The band width scales with voxel_pitch (see FINGER_BAND_VOXELS) so
@@ -1255,7 +1275,9 @@ if __name__ == "__main__":
         help=t_("cli.finger_recess_z_offset", default=Config.finger_recess_z_offset)
     )
     parser.add_argument(
-        "--finger-recess-position", type=float, default=Config.finger_recess_position,
+        "--finger-recess-position", type=float, nargs="+",
+        default=[Config.finger_recess_position],
+        metavar="P",
         help=t_("cli.finger_recess_position", default=Config.finger_recess_position)
     )
     parser.add_argument(
@@ -1286,13 +1308,24 @@ if __name__ == "__main__":
         finger_radius=args.finger_radius,
         finger_recess_axis=args.finger_recess_axis,
         finger_recess_z_offset=args.finger_recess_z_offset,
-        finger_recess_position=args.finger_recess_position,
+        finger_recess_position=args.finger_recess_position[0],
         enable_parallel=args.parallel,
     )
 
     input_paths = args.input
     multi = len(input_paths) > 1
     t_total = time.perf_counter()
+
+    # One value applies to every figure, otherwise one value per input file -
+    # anything else is a silent mismatch between flags and files.
+    recess_positions = list(args.finger_recess_position)
+    if len(recess_positions) == 1:
+        recess_positions = recess_positions * len(input_paths)
+    elif len(recess_positions) != len(input_paths):
+        parser.error(
+            t_("cli.error.recess_position_count",
+               given=len(recess_positions), n=len(input_paths))
+        )
 
     # Schritt 1: Alle Figuren vorbereiten (optional parallel)
     label = (t_("cli.label.figures", n=len(input_paths)) if multi
@@ -1327,7 +1360,8 @@ if __name__ == "__main__":
     # Schritt 3: Inlay konstruieren (Multi-Mesh oder Single)
     print(t_("cli.step3"))
     inlay, box_w, box_d, box_h = build_inlay(
-        dilated_meshes, config, stable_global_bounds=stable_bounds
+        dilated_meshes, config, stable_global_bounds=stable_bounds,
+        individual_recess_positions=recess_positions,
     )
     inlay.export(file_obj=args.output, file_type="stl")
     print(t_("cli.saved", path=args.output))
