@@ -156,6 +156,73 @@ class TestCLI:
         assert match is not None, result.stdout
         assert float(match.group(1)) > 20.0
 
+    def test_cli_recess_position_per_figure(self, cube_stl_path, sphere_stl_path, tmp_path):
+        """--finger-recess-position accepts one value per input file."""
+        out = tmp_path / "inlay.stl"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path, sphere_stl_path,
+                "-o", str(out),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+                "--finger-recesses",
+                "--finger-radius", "3.0",
+                "--finger-recess-position", "0.8", "-0.8",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"CLI with per-figure recess positions failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_cli_recess_position_count_mismatch_fails(self, cube_stl_path, sphere_stl_path, tmp_path):
+        """Neither one value nor one per file: the CLI must refuse, not guess."""
+        out = tmp_path / "inlay.stl"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path, sphere_stl_path,
+                "-o", str(out),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+                "--finger-recesses",
+                "--finger-recess-position", "0.1", "0.2", "0.3",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "--finger-recess-position" in result.stderr
+
+    def test_cli_recess_position_out_of_range_fails(self, cube_stl_path, tmp_path):
+        """A position beyond +/-1.0 is rejected before anything is written."""
+        out = tmp_path / "inlay.stl"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path,
+                "-o", str(out),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+                "--finger-recesses",
+                "--finger-recess-position", "2.0",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert not out.exists()
+
     def test_cli_missing_input_fails(self, tmp_path):
         result = subprocess.run(
             [

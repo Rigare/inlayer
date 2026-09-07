@@ -16,6 +16,42 @@ import trimesh
 import app_helpers
 
 
+class TestRecessPositionTargets:
+    """Figure selection of the per-figure finger recess position control."""
+
+    ALL = "Alle Figuren"  # the app's untranslated sentinel
+
+    def test_all_figures_reads_first_writes_every(self):
+        names = ["a.stl", "b.stl", "c.stl"]
+        ref, targets = app_helpers.recess_position_targets(self.ALL, names, self.ALL)
+        assert ref == "a.stl"
+        assert targets == names
+
+    def test_single_selection_reads_and_writes_that_figure(self):
+        names = ["a.stl", "b.stl"]
+        ref, targets = app_helpers.recess_position_targets("b.stl", names, self.ALL)
+        assert ref == "b.stl"
+        assert targets == ["b.stl"]
+
+    def test_stale_selection_falls_back_to_the_first_figure(self):
+        """A figure removed from the upload must not raise on the next rerun."""
+        names = ["a.stl"]
+        ref, targets = app_helpers.recess_position_targets("gone.stl", names, self.ALL)
+        assert ref == "a.stl"
+        assert targets == ["a.stl"]
+
+    def test_returned_target_list_is_a_copy(self):
+        """The caller writes through the list; it must not alias fig_names."""
+        names = ["a.stl", "b.stl"]
+        _, targets = app_helpers.recess_position_targets(self.ALL, names, self.ALL)
+        targets.append("c.stl")
+        assert names == ["a.stl", "b.stl"]
+
+    def test_empty_figure_list_raises(self):
+        with pytest.raises(ValueError):
+            app_helpers.recess_position_targets(self.ALL, [], self.ALL)
+
+
 class TestFileHash:
     def test_known_content(self, tmp_path):
         p = tmp_path / "a.bin"

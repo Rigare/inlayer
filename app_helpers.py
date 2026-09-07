@@ -59,6 +59,25 @@ def selection_key(axis: str) -> str:
     return "selected_rot_fig" if axis.startswith("rot_") else "selected_fig"
 
 
+def recess_position_targets(
+    selected: str, fig_names: list[str], all_sentinel: str
+) -> tuple[str, list[str]]:
+    """Resolves the figure selection of the finger recess position control.
+
+    Returns the reference figure whose stored value the slider shows, and the
+    figures a change writes to. The "all figures" sentinel reads from the first
+    figure and writes to every one of them; a stale selection (a figure that was
+    removed from the upload) falls back to the first figure instead of raising.
+    """
+    if not fig_names:
+        raise ValueError(t("error.no_meshes"))
+    if selected == all_sentinel:
+        return fig_names[0], list(fig_names)
+    if selected not in fig_names:
+        return fig_names[0], [fig_names[0]]
+    return selected, [selected]
+
+
 def is_rotation_axis(axis: str) -> bool:
     """True fuer Rotationsachsen (rot_x/rot_y/rot_z), sonst False."""
     return axis.startswith("rot_")

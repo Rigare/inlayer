@@ -233,6 +233,18 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Senkt die Mulden unter die Box-Oberkante ab, z.B. um bei KeyCaps nur die Tastenkappe zu berühren.",
         "en": "Lowers the recesses below the box's top edge, e.g. to touch only the cap on keycaps.",
     },
+    "app.finger.position.label": {
+        "de": "Muldenposition entlang der Figur (%)",
+        "en": "Recess position along the figure (%)",
+    },
+    "app.finger.position.help": {
+        "de": "Verschiebt beide Mulden entlang der Figur (quer zur Muldenachse): 0 % = Mitte, negative Werte nach vorne/links, positive nach hinten/rechts. So lässt sich die Greifstelle wählen, ohne die Mulden tiefer zu legen. Der Wert gilt je Figur.",
+        "en": "Slides both recesses along the figure (across the recess axis): 0 % = centre, negative towards front/left, positive towards back/right. Lets you pick the grip point without sinking the recesses deeper. The value is stored per figure.",
+    },
+    "app.finger.position.select_fig": {
+        "de": "Figur für die Muldenposition auswählen",
+        "en": "Select figure for the recess position",
+    },
     # --- Sidebar: Performance ----------------------------------------------
     "app.performance.heading": {
         "de": "### ⚡ Performance",
@@ -737,6 +749,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "finger_recess_axis muss 'x' oder 'y' sein (ist '{value}')",
         "en": "finger_recess_axis must be 'x' or 'y' (is '{value}')",
     },
+    "config.bad_finger_position": {
+        "de": "finger_recess_position muss zwischen -1.0 und 1.0 liegen (ist {value})",
+        "en": "finger_recess_position must be between -1.0 and 1.0 (is {value})",
+    },
     "error.not_manifold": {
         "de": "Figur{label} ist nach der Solidifizierung nicht manifold / wasserdicht. CSG würde wahrscheinlich fehlschlagen. Versuche einen größeren voxel_pitch oder prüfe die Eingabedatei.",
         "en": "Figure{label} is not manifold / watertight after solidification. CSG would most likely fail. Try a larger voxel_pitch or check the input file.",
@@ -865,6 +881,14 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "cli.finger_recess_z_offset": {
         "de": "Absenkung der Fingermulden unter die Box-Oberkante in mm (Standard: {default})",
         "en": "How far the finger recesses sit below the box's top edge, in mm (default: {default})",
+    },
+    "cli.finger_recess_position": {
+        "de": "Position der Fingermulden entlang der Figur, -1.0 bis 1.0 (0.0 = Mitte, Standard: {default}). Ein Wert gilt fuer alle Figuren, sonst ein Wert je Eingabedatei in deren Reihenfolge",
+        "en": "Position of the finger recesses along the figure, -1.0 to 1.0 (0.0 = centre, default: {default}). One value applies to every figure, otherwise pass one value per input file in that order",
+    },
+    "cli.error.recess_position_count": {
+        "de": "--finger-recess-position erwartet 1 Wert oder einen je Eingabedatei ({given} angegeben, {n} Dateien)",
+        "en": "--finger-recess-position expects 1 value or one per input file (got {given} for {n} files)",
     },
     "cli.parallel": {
         "de": "Mehrere Figuren parallel auf mehreren CPU-Kernen verarbeiten (max. {workers} Threads, erhöht den Speicherbedarf)",
