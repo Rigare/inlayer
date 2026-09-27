@@ -213,6 +213,22 @@ class TestLanguageSwitchKeepsState:
         assert _widget(at, "checkbox", "manual_rotations").value is True
         assert len(_ids(at)) == 1
 
+    def test_translated_selectboxes_keep_their_value(self):
+        """Streamlit sends a selectbox value as its *label*. After a switch the
+        old label matches no option: the recess axis came back as the string
+        "left/right" (a crash on the next run), box shape and layout fell back
+        to their defaults."""
+        at = _two_figures(finger_enabled=True)
+        for key, value in (("_w_finger_axis", "y"), ("_w_box_shape", "cylinder"),
+                           ("_w_layout_style", "vertical")):
+            _widget(at, "selectbox", key).set_value(value).run()
+        _widget(at, "selectbox", "ui_lang").set_value("de").run()
+        _widget(at, "checkbox", "parallel").check().run()  # any further rerun
+        assert not at.exception, [str(e.value) for e in at.exception]
+        assert _widget(at, "selectbox", "_w_finger_axis").value == "y"
+        assert _widget(at, "selectbox", "_w_box_shape").value == "cylinder"
+        assert _widget(at, "selectbox", "_w_layout_style").value == "vertical"
+
 
 class TestFingerRecessPosition:
     """The recess position is stored per upload; one slider shows the selected one."""

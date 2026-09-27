@@ -31,6 +31,8 @@ DYNAMIC_KEYS = (
     "app.layout.compact",
     "app.layout.horizontal",
     "app.layout.vertical",
+    "app.finger.axis.x",
+    "app.finger.axis.y",
     # inlayer.describe_violation: t_(f"check.{kind}")
     "check.side",
     "check.floor",

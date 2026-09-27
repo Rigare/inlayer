@@ -243,32 +243,49 @@ for _fid in fig_ids:
     stored.setdefault(_fid, dict(app_helpers.FIGURE_DEFAULTS))
 
 
+_labels[ALL_FIGURES] = t("app.all_figures")
+
+
 def _fig_label(fid: str) -> str:
     """Label of a figure option: sentinel translated, uploads by unique name."""
-    return t("app.all_figures") if fid == ALL_FIGURES else _labels.get(fid, fid)
+    return _labels.get(fid, fid)
 
 
-# Step sizes live in plain session keys, not in the selectbox keys: Streamlit
-# drops a widget's state while the widget is not rendered. Hiding the rotation
-# section (or a language switch resetting the checkbox) silently put the step
-# back to 45°, a stored 350° then exceeded the slider's max of 315° and every
-# rerun failed with StreamlitValueAboveMaxError.
+def _select(label: str, labels: dict, key: str, default, **kwargs):
+    """Selectbox over `labels` (value -> display text) whose value lives in a
+    plain session key (`key`).
+
+    Streamlit drops a widget's state while the widget is not rendered, and it
+    sends a selectbox's value as its *label*. Hiding the rotation section put
+    the step back to 45° (a stored 350° then exceeded the slider's max and
+    every rerun raised); after a language switch the old label matched no
+    option - a lenient format_func turned "left/right" into the recess axis,
+    a strict one reset the box shape to its default. So the raw value is kept
+    here, seeds `index`, and the widget only writes through. The labels are
+    resolved once per run and unknown values map to no label at all.
+    """
+    st.session_state.setdefault(key, default)
+    widget_key = f"_w_{key}"
+    options = list(labels)
+    return st.sidebar.selectbox(
+        label, options,
+        index=options.index(st.session_state[key]),
+        format_func=lambda v: labels.get(v, str(v)),
+        key=widget_key,
+        on_change=lambda: st.session_state.update({key: st.session_state[widget_key]}),
+        **kwargs,
+    )
+
+
+def _step_select(label: str, options: list[float], unit: str, step_key: str) -> float:
+    """Step size of the offset or rotation sliders."""
+    return float(_select(label, {x: f"{int(x)}{unit}" for x in options},
+                         step_key, STEP_DEFAULTS[step_key]))
+
+
 STEP_DEFAULTS = {"rot_step": 45.0, "pos_step": 10.0}
 for _step_key, _step_default in STEP_DEFAULTS.items():
     st.session_state.setdefault(_step_key, _step_default)
-
-
-def _step_select(label: str, options: list[float], unit: str, step_key: str):
-    """Step-size selectbox that writes through to the persistent step key."""
-    widget_key = f"_w_{step_key}"
-    st.sidebar.selectbox(
-        label, options,
-        index=options.index(st.session_state[step_key]),
-        format_func=lambda x: f"{int(x)}{unit}",
-        key=widget_key,
-        on_change=lambda: st.session_state.update({step_key: st.session_state[widget_key]}),
-    )
-    return float(st.session_state[step_key])
 
 
 def _quantize_axis(axis: str, val: float) -> float:
@@ -430,12 +447,10 @@ if enable_finger_recesses:
         help=t("app.finger.radius.help"),
         key="finger_radius",
     )
-    finger_recess_axis = st.sidebar.selectbox(
+    finger_recess_axis = _select(
         t("app.finger.axis.label"),
-        options=["x", "y"],
-        format_func=lambda a: t("app.finger.axis.x") if a == "x" else t("app.finger.axis.y"),
+        {"x": t("app.finger.axis.x"), "y": t("app.finger.axis.y")}, "finger_axis", "x",
         help=t("app.finger.axis.help"),
-        key="finger_axis",
     )
     finger_recess_z_offset = st.sidebar.slider(
         t("app.finger.z_offset.label"),
@@ -472,12 +487,9 @@ enable_parallel = st.sidebar.checkbox(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.box.heading"))
-box_shape = st.sidebar.selectbox(
+box_shape = _select(
     t("app.box.shape.label"),
-    options=["box", "cylinder"],
-    format_func=lambda x: t(f"app.box.shape.{x}"),
-    index=0,
-    key="box_shape",
+    {"box": t("app.box.shape.box"), "cylinder": t("app.box.shape.cylinder")}, "box_shape", "box",
     help=t("app.box.shape.help"),
 )
 use_custom_box = st.sidebar.checkbox(t("app.box.custom.label"), value=False, key="use_custom_box")
@@ -553,13 +565,10 @@ if multi_mode:
 else:
     figure_gap = None
 
-layout_style = st.sidebar.selectbox(
+layout_style = _select(
     t("app.layout.label"),
-    options=["compact", "horizontal", "vertical"],
-    format_func=lambda x: t(f"app.layout.{x}"),
-    index=0,
-    key="layout_style",
-    help=t("app.layout.help")
+    {x: t(f"app.layout.{x}") for x in ("compact", "horizontal", "vertical")}, "layout_style", "compact",
+    help=t("app.layout.help"),
 ) if multi_mode else "compact"
 
 
