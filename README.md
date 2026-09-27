@@ -296,7 +296,7 @@ frontend testable.
 | Job | What it does | Why |
 |---|---|---|
 | `pytest (Python 3.13)` | Installs `requirements-dev.txt` on a plain runner and runs the suite | Fast feedback (~1 min) |
-| `Docker test stage` | `docker build --target test .` | Runs the same suite inside the pinned `python:3.13-slim` image — the only place a broken version pin or a source file missing from the Dockerfile's `COPY` list shows up |
+| `Docker test stage` | `docker build --target test .`, then `--target runtime` plus a smoke test (module imports, `/_stcore/health` of the running container) | Runs the same suite inside the pinned `python:3.13-slim` image — the only place a broken version pin or a source file missing from the Dockerfile's `COPY` list shows up — and proves the deploy image starts |
 
 Runs on the same branch supersede each other, so an outdated commit does not
 keep a runner busy.

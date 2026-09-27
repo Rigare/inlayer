@@ -4,9 +4,12 @@ FROM python:3.13-slim AS base
 
 WORKDIR /app
 
-# Systemabhängigkeiten fuer pymeshfix / manifold3d
+# No compiler: every pinned requirement resolves as a cp313 wheel for x86_64
+# and aarch64 (pip install --dry-run --only-binary=:all:), and build-essential
+# added ~350 MB plus a toolchain to the internet-facing image. Should a
+# source build ever be needed, it belongs in a builder stage of its own.
+# libgl1/libglib2.0-0 stay deliberately (see AGENTS.md, CI section).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
