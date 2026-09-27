@@ -155,9 +155,15 @@ def _decimated_for_viz(
 
 
 @st.cache_resource(show_spinner=False, max_entries=32)
-def _preview_mesh(_data: bytes, cache_key: str, scale: float) -> trimesh.Trimesh:
-    """Laedt eine hochgeladene STL dezimiert fuer die Sofort-Vorschau (gecacht)."""
-    return app_helpers.load_preview_mesh(_data, scale)
+def _preview_mesh(_data: bytes, content_hash: str, scale: float, _name: str) -> trimesh.Trimesh:
+    """Loads an uploaded STL, decimated, for the instant preview (cached).
+
+    The cache is process-wide, so the key must identify the mesh by content:
+    keyed by name and size, a second user uploading a different `model.stl`
+    of the same size was shown the first user's model. With a content hash a
+    session only ever gets a cached object for bytes it uploaded itself.
+    """
+    return app_helpers.load_preview_mesh(_data, scale, _name)
 
 
 # --- Plotly-Helfer ------------------------------------------------------------
@@ -218,6 +224,16 @@ if not uploaded_files:
 multi_mode = len(uploaded_files) > 1
 if multi_mode:
     st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
+
+# Content hash per upload, computed once per upload rather than on every rerun.
+# It is the identity of a file in every process-wide cache key and in the
+# staleness snapshot - name and size are not (see _preview_mesh).
+_known_hashes = st.session_state.get("_hash_by_file_id", {})
+content_hashes = {
+    uf.file_id: _known_hashes.get(uf.file_id) or app_helpers.bytes_hash(uf.getvalue())
+    for uf in uploaded_files
+}
+st.session_state["_hash_by_file_id"] = content_hashes
 
 # Session state. Deliberately right after the upload instead of further down:
 # the finger recess controls above it in the sidebar already address individual
@@ -487,13 +503,33 @@ if selected_fig not in valid_fig_names:
 # Rotationsachsen tragen das Praefix "rot_" und werden modulo 360 quantisiert;
 # Positionsachsen ("offset_") werden auf die jeweilige Schrittweite gerundet.
 
+# Step sizes live in plain session keys, not in the selectbox keys: Streamlit
+# drops a widget's state while the widget is not rendered. Hiding the rotation
+# section (or a language switch resetting the checkbox) silently put the step
+# back to 45°, a stored 350° then exceeded the slider's max of 315° and every
+# rerun failed with StreamlitValueAboveMaxError.
+STEP_DEFAULTS = {"rot_step": 45.0, "pos_step": 10.0}
+for _step_key, _step_default in STEP_DEFAULTS.items():
+    st.session_state.setdefault(_step_key, _step_default)
+
+
+def _step_select(label: str, options: list[float], unit: str, step_key: str):
+    """Step-size selectbox that writes through to the persistent step key."""
+    widget_key = f"_w_{step_key}"
+    st.sidebar.selectbox(
+        label, options,
+        index=options.index(st.session_state[step_key]),
+        format_func=lambda x: f"{int(x)}{unit}",
+        key=widget_key,
+        on_change=lambda: st.session_state.update({step_key: st.session_state[widget_key]}),
+    )
+    return float(st.session_state[step_key])
+
+
 def _quantize_axis(axis: str, val: float) -> float:
-    """Holt die Schrittweite aus dem Session-State und quantisiert damit."""
-    if app_helpers.is_rotation_axis(axis):
-        step = float(st.session_state.get("rot_step_size", 45.0))
-    else:
-        step = float(st.session_state.get("pos_step_size", 10.0))
-    return app_helpers.quantize_axis_value(axis, val, step)
+    """Quantizes with the current step size of the axis kind."""
+    step_key = "rot_step" if app_helpers.is_rotation_axis(axis) else "pos_step"
+    return app_helpers.quantize_axis_value(axis, val, float(st.session_state[step_key]))
 
 
 _selection_key = app_helpers.selection_key
@@ -532,12 +568,15 @@ def _load_axes_from_selection(axes: list[str]):
         st.session_state[f"_ni_{axis}"] = offsets[axis]
 
 def _requantize_axes(axes: list[str]):
-    """Snappt alle gespeicherten Werte der Achsen auf die neue Schrittweite."""
-    offsets_dict = st.session_state.get("fig_offsets_dict", {})
-    for name in fig_names:
-        if name in offsets_dict:
-            for axis in axes:
-                offsets_dict[name][axis] = _quantize_axis(axis, offsets_dict[name].get(axis, 0.0))
+    """Snaps every stored value and every display key to the current step.
+
+    Runs on every rerun, before the sliders exist: that keeps what the sliders
+    show and what the pipeline reads identical, and keeps each value inside
+    its slider's range whatever step it was stored with.
+    """
+    for offsets in st.session_state.get("fig_offsets_dict", {}).values():
+        for axis in axes:
+            offsets[axis] = _quantize_axis(axis, offsets.get(axis, 0.0))
     for axis in axes:
         if axis in st.session_state:
             val = _quantize_axis(axis, st.session_state[axis])
@@ -551,12 +590,8 @@ def _on_fig_selected():
 def _on_rot_fig_selected():
     _load_axes_from_selection(["rot_x", "rot_y", "rot_z"])
 
-def _on_rot_step_change():
-    _requantize_axes(["rot_x", "rot_y", "rot_z"])
 
-def _on_pos_step_change():
-    _requantize_axes(["offset_x", "offset_y", "offset_z"])
-
+_requantize_axes(["offset_x", "offset_y", "offset_z", "rot_x", "rot_y", "rot_z"])
 
 # Sicherstellen, dass die Werte für das aktuelle Widget geladen sind
 # 1. Positionen
@@ -623,16 +658,7 @@ if enable_manual_offsets:
             on_change=_on_fig_selected,
         )
 
-    # Schrittweite für Positionierung
-    st.sidebar.selectbox(
-        t("app.pos_step.label"),
-        options=[1.0, 5.0, 10.0],
-        format_func=lambda x: f"{int(x)} mm",
-        index=2,
-        key="pos_step_size",
-        on_change=_on_pos_step_change,
-    )
-    pos_step = float(st.session_state.get("pos_step_size", 10.0))
+    pos_step = _step_select(t("app.pos_step.label"), [1.0, 5.0, 10.0], " mm", "pos_step")
 
     _axis_row("offset_x", t("app.offset_x.label"), -100.0, 100.0, pos_step,
               t("app.offset_x.help"))
@@ -658,16 +684,7 @@ if enable_manual_rotations:
         on_change=_on_rot_fig_selected,
     )
 
-    # Schrittweite für Drehung
-    st.sidebar.selectbox(
-        t("app.rot_step.label"),
-        options=[1.0, 5.0, 10.0, 45.0],
-        format_func=lambda x: f"{int(x)}°",
-        index=3,
-        key="rot_step_size",
-        on_change=_on_rot_step_change,
-    )
-    rot_step = float(st.session_state.get("rot_step_size", 45.0))
+    rot_step = _step_select(t("app.rot_step.label"), [1.0, 5.0, 10.0, 45.0], "°", "rot_step")
     max_rot = 360.0 - rot_step
 
     _axis_row("rot_x", t("app.rot_x.label"), 0.0, max_rot, rot_step, t("app.rot_x.help"))
@@ -696,7 +713,7 @@ def _params_snapshot() -> dict:
             off.get("finger_recess_position", 0.0) if enable_finger_recesses else 0.0,
         )
     return {
-        "files": [(uf.name, uf.size) for uf in uploaded_files],
+        "files": [(uf.name, content_hashes[uf.file_id]) for uf in uploaded_files],
         "clearance": clearance,
         "wall_thickness": wall_thickness,
         "depth_fraction": depth_fraction,
@@ -733,17 +750,20 @@ if run_btn:
         fallback_path = "figur.stl"
         input_paths: list[str] = []
         file_names: list[str] = []
+        file_hashes: list[str] = []
 
         if uploaded_files:
             for uf in uploaded_files:
                 with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
-                    tmp.write(uf.getbuffer())
+                    tmp.write(uf.getvalue())
                     tmp_paths.append(tmp.name)
                 input_paths.append(tmp_paths[-1])
                 file_names.append(uf.name)
+                file_hashes.append(content_hashes[uf.file_id])
         elif os.path.exists(fallback_path):
             input_paths = [fallback_path]
             file_names = [fallback_path]
+            file_hashes = [_file_hash(fallback_path)]
         else:
             st.error(t("app.error.no_input", path=fallback_path))
             st.stop()
@@ -802,9 +822,6 @@ if run_btn:
             individual_recess_positions.append(
                 float(off.get("finger_recess_position", 0.0)) if enable_finger_recesses else 0.0
             )
-
-        # Datei-Hashes einmal vorab berechnen (Cache-Keys, je Datei nur ein Read)
-        file_hashes = [_file_hash(p) for p in input_paths]
 
         # Schritt 1: Alle Figuren vorbereiten und ggf. rotieren (optional parallel)
         label = (t("app.label.figures", n=n_files) if is_multi
@@ -913,6 +930,14 @@ if run_btn:
             "depth_fraction": depth_fraction,
             "inlay": inlay,
             "fig_meshes": fig_meshes,
+            # Everything that determines a prepared, rotated figure. The inlay's
+            # hash does not: two figures on the same round base cut the same
+            # inlay, and the preview then drew the other session's figure.
+            "fig_cache_keys": [
+                f"{file_hashes[i]}:{scale}:{voxel_pitch}:{decimate_faces}:"
+                + ":".join(str(r) for r in individual_rotations[i])
+                for i in range(n_files)
+            ],
             "fig_offsets": fig_offsets,
             "file_names": file_names,
             "is_multi": is_multi,
@@ -1062,7 +1087,7 @@ if "result" in st.session_state:
 
         for i, (fig_m, fig_ot) in enumerate(zip(fig_meshes, fig_offsets)):
             # Dezimierung (gecacht) vor der Translation – beides ist reihenfolgeunabhaengig
-            viz_fig = _decimated_for_viz(fig_m, f"{_token}:fig{i}", max_fig_faces).copy()
+            viz_fig = _decimated_for_viz(fig_m, res["fig_cache_keys"][i], max_fig_faces).copy()
             bmin_ot_z = float(fig_ot.bounds[0][2])
             trans_x = xy_trans[i][0] - _sx
             trans_y = xy_trans[i][1] - _sy
@@ -1084,11 +1109,10 @@ if "result" in st.session_state:
         recesses = inlay.metadata.get("finger_recesses", []) if hasattr(inlay, "metadata") else []
         if recesses:
             for r_idx, cyl in enumerate(recesses):
-                # Dezimierung gecacht, damit sie bei reinen Reruns nicht erneut laeuft
-                viz_cyl = _decimated_for_viz(cyl, f"{_token}:recess{r_idx}", 5000)
-
+                # Drawn as they are: a recess has far fewer faces than any
+                # decimation budget, so there is nothing to cache.
                 fig_3d.add_trace(_mesh3d(
-                    viz_cyl, color="#f1c40f", opacity=0.3,
+                    cyl, color="#f1c40f", opacity=0.3,
                     name=t("app.trace.recesses"), showlegend=(r_idx == 0),
                 ))
 
@@ -1104,7 +1128,12 @@ elif uploaded_files:
         prev_fig = go.Figure()
         cur_x = 0.0
         for i, uf in enumerate(uploaded_files):
-            mesh = _preview_mesh(bytes(uf.getbuffer()), f"{uf.name}:{uf.size}", scale)
+            # One broken file must not take the preview of the others with it.
+            try:
+                mesh = _preview_mesh(uf.getvalue(), content_hashes[uf.file_id], scale, uf.name)
+            except ValueError as exc:
+                st.warning(str(exc))
+                continue
             rot = st.session_state["fig_offsets_dict"].get(uf.name, {})
             rx = rot.get("rot_x", 0.0) if enable_manual_rotations else 0.0
             ry = rot.get("rot_y", 0.0) if enable_manual_rotations else 0.0

@@ -179,28 +179,50 @@ class TestLoadPreviewMesh:
     def test_loads_stl_bytes(self, tmp_path):
         box = trimesh.creation.box(extents=[10, 10, 10])
         data = cast(bytes, box.export(file_type="stl"))
-        out = app_helpers.load_preview_mesh(data, 1.0)
+        out = app_helpers.load_preview_mesh(data, 1.0, "box.stl")
         assert len(out.faces) > 0
 
     def test_scale_is_applied(self):
         box = trimesh.creation.box(extents=[10, 10, 10])
         data = cast(bytes, box.export(file_type="stl"))
-        out = app_helpers.load_preview_mesh(data, 2.0)
+        out = app_helpers.load_preview_mesh(data, 2.0, "box.stl")
         # Skalierung verdoppelt die Kantenlaenge.
         assert out.extents[0] == pytest.approx(20.0, rel=1e-3)
 
     def test_scale_one_leaves_size(self):
         box = trimesh.creation.box(extents=[10, 10, 10])
         data = cast(bytes, box.export(file_type="stl"))
-        out = app_helpers.load_preview_mesh(data, 1.0)
+        out = app_helpers.load_preview_mesh(data, 1.0, "box.stl")
         assert out.extents[0] == pytest.approx(10.0, rel=1e-3)
 
     def test_large_mesh_is_decimated(self):
         sphere = trimesh.creation.icosphere(subdivisions=6)  # 81920 Faces
         assert len(sphere.faces) > app_helpers.PREVIEW_FACE_BUDGET
         data = cast(bytes, sphere.export(file_type="stl"))
-        out = app_helpers.load_preview_mesh(data, 1.0)
+        out = app_helpers.load_preview_mesh(data, 1.0, "box.stl")
         assert len(out.faces) < len(sphere.faces)
+
+    @pytest.mark.parametrize(
+        "data",
+        [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2],
+        ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage"],
+    )
+    def test_empty_or_garbled_upload_names_the_file(self, data):
+        """An empty mesh used to crash the preview on `mesh.bounds[0][0]`."""
+        with pytest.raises(ValueError, match="upload.stl"):
+            app_helpers.load_preview_mesh(data, 1.0, "upload.stl")
+
+
+class TestBytesHash:
+    def test_matches_file_hash_of_the_same_content(self, tmp_path):
+        data = bytes(range(256)) * 100
+        p = tmp_path / "x.bin"
+        p.write_bytes(data)
+        assert app_helpers.bytes_hash(data) == app_helpers.file_hash(str(p))
+
+    def test_same_size_different_content_differs(self):
+        """Name and size were the cache key; two 684-byte STLs collided."""
+        assert app_helpers.bytes_hash(b"a" * 684) != app_helpers.bytes_hash(b"b" * 684)
 
 
 class TestSceneLayout:

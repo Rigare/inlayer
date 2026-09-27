@@ -773,6 +773,18 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "CSG-Differenz ergab leeres Mesh. Prüfe Box-Dimensionen und ob sich die Geometrien überlappen.",
         "en": "CSG difference produced an empty mesh. Check the box dimensions and whether the geometries overlap.",
     },
+    "error.input_not_found": {
+        "de": "Eingabedatei nicht gefunden: {path}",
+        "en": "Input file not found: {path}",
+    },
+    "error.empty_input": {
+        "de": "{name} enthält keine Dreiecke – die Datei ist leer oder keine gültige STL.",
+        "en": "{name} contains no triangles – the file is empty or not a valid STL.",
+    },
+    "error.grid_too_large": {
+        "de": "{name} ist für diese Auflösung zu groß: das Voxelgitter hätte {voxels} Voxel (Grenze {limit}). Wähle einen größeren voxel_pitch oder prüfe die Skalierung.",
+        "en": "{name} is too large for this resolution: its voxel grid would have {voxels} voxels (limit {limit}). Choose a larger voxel_pitch or check the scale.",
+    },
     # --- CLI ----------------------------------------------------------------
     "cli.description": {
         "de": "Inlayer: Erstellt 3D-druckbare Verpackungseinleger für Figuren.",

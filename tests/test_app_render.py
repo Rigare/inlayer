@@ -10,9 +10,13 @@ dass die Sprachumschaltung die Beschriftungen erreicht.
 
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import trimesh
 from streamlit.testing.v1 import AppTest
 
 import i18n
@@ -25,6 +29,90 @@ def _run(lang: str) -> AppTest:
     at.session_state["ui_lang"] = lang
     at.run()
     return at
+
+
+def _stl(extents) -> bytes:
+    return trimesh.creation.box(extents=extents).export(file_type="stl")
+
+
+def _upload(at: AppTest, files: list[tuple[str, bytes]]) -> AppTest:
+    at.file_uploader[0].set_value([(name, data, "model/stl") for name, data in files])
+    at.run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    return at
+
+
+def _checkbox(at: AppTest, key: str):
+    label = i18n.TRANSLATIONS[key][i18n.get_language()]
+    return next(c for c in at.sidebar.checkbox if c.label == label)
+
+
+def _warned(at: AppTest, key: str) -> bool:
+    """Whether a warning with that text is shown (Streamlit strips a leading emoji)."""
+    text = i18n.TRANSLATIONS[key][i18n.get_language()]
+    return any(w.value.strip() and w.value.strip() in text for w in at.warning)
+
+
+def _trace_extents(at: AppTest) -> dict[str, float]:
+    """X extent of every trace in the first 3D chart, by trace name."""
+    spec = json.loads(at.get("plotly_chart")[0].proto.spec)
+    extents = {}
+    for trace in spec["data"]:
+        x = trace["x"]
+        if isinstance(x, dict):  # plotly ships numpy arrays base64-encoded
+            x = np.frombuffer(base64.b64decode(x["bdata"]), dtype=x["dtype"])
+        extents[trace["name"]] = float(np.ptp(np.asarray(x, dtype=float)))
+    return extents
+
+
+class TestUploadRobustness:
+    def test_broken_file_is_skipped_with_a_warning(self):
+        """One empty upload used to crash the preview of every file (review B18)."""
+        at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("empty.stl", b"")])
+        assert any("empty.stl" in w.value for w in at.warning)
+        assert list(_trace_extents(at)) == ["a.stl"]
+
+
+class TestCacheIdentity:
+    """Process-wide caches are keyed by content, never by name and size."""
+
+    def test_sessions_do_not_see_each_others_upload(self):
+        """Two 12-triangle STLs share name and size (684 bytes) - review B20."""
+        first, second = _stl([10, 10, 10]), _stl([20, 5, 5])
+        assert len(first) == len(second)
+        _upload(_run("en"), [("model.stl", first)])
+        other_session = _upload(_run("en"), [("model.stl", second)])
+        assert _trace_extents(other_session)["model.stl"] == pytest.approx(20.0)
+
+    def test_replacing_a_file_of_the_same_size_marks_the_result_stale(self):
+        at = _upload(_run("en"), [("model.stl", _stl([10, 10, 10]))])
+        next(s for s in at.sidebar.slider
+             if s.label == i18n.TRANSLATIONS["app.voxel_pitch.label"]["en"]).set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception, [str(e.value) for e in at.exception]
+        assert not _warned(at, "app.results.stale")
+        _upload(at, [("model.stl", _stl([20, 5, 5]))])
+        assert _warned(at, "app.results.stale")
+
+
+class TestRotationStepSurvivesHiding:
+    """Streamlit drops a widget's state while it is not rendered (review B19).
+
+    The rotation step fell back to 45° when the section was hidden, a stored
+    350° then exceeded the slider's max of 315° and every rerun raised.
+    """
+
+    def test_hide_and_show_keeps_step_and_angle(self):
+        at = _run("en")
+        _checkbox(at, "app.manual_rotations.label").check().run()
+        next(s for s in at.sidebar.selectbox if s.key == "_w_rot_step").set_value(10.0).run()
+        next(s for s in at.sidebar.slider if s.key == "_sl_rot_x").set_value(350.0).run()
+        _checkbox(at, "app.manual_rotations.label").uncheck().run()
+        _checkbox(at, "app.manual_rotations.label").check().run()
+        assert not at.exception, [str(e.value) for e in at.exception]
+        assert next(s for s in at.sidebar.selectbox if s.key == "_w_rot_step").value == 10.0
+        assert next(s for s in at.sidebar.slider if s.key == "_sl_rot_x").value == 350.0
+        assert at.button, "the run button must still render"
 
 
 @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))

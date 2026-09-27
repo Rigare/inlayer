@@ -12,13 +12,132 @@ from inlayer import Config
 
 class TestPrepareFigureErrors:
     def test_missing_file_raises_filenotfound(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="nicht gefunden"):
+        with pytest.raises(FileNotFoundError, match="not found"):
             inlayer.prepare_figure(str(tmp_path / "nope.stl"))
 
     def test_directory_path_raises_filenotfound(self, tmp_path):
         # Ein Verzeichnis ist keine Datei -> os.path.isfile() False
         with pytest.raises(FileNotFoundError):
             inlayer.prepare_figure(str(tmp_path))
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"", bytes(84), np.random.default_rng(0).bytes(500)],
+        ids=["zero-bytes", "header-without-triangles", "random-bytes"],
+    )
+    def test_empty_or_garbled_file_names_the_file(self, tmp_path, content):
+        """trimesh returns an empty mesh instead of raising; that used to end in
+        a cryptic `'NoneType' object has no attribute 'round'` far downstream."""
+        path = tmp_path / "broken.stl"
+        path.write_bytes(content)
+        with pytest.raises(ValueError, match="broken.stl.*no triangles"):
+            inlayer.prepare_figure(str(path))
+
+    def test_oversized_grid_is_refused_up_front(self, cube_stl_path):
+        """A small file scaled up must fail with a message, not exhaust memory."""
+        cfg = Config(stl_unit_to_mm=1000.0, voxel_pitch=0.2)
+        with pytest.raises(ValueError, match="too large"):
+            inlayer.prepare_figure(cube_stl_path, cfg)
+
+
+class TestPrepareFigureKeepsEveryShell:
+    """pymeshfix's default repair kept only the shell with the most triangles.
+
+    Whether a part survived depended on an unrelated hole anywhere in the file:
+    a watertight two-shell file skipped the repair and kept both, the same file
+    with one missing triangle lost everything but its largest shell.
+    """
+
+    @staticmethod
+    def _holed_box(extents, at):
+        box = trimesh.creation.box(extents=extents)
+        box.apply_translation(at)
+        keep = np.ones(len(box.faces), dtype=bool)
+        keep[0] = False  # one missing triangle forces the repair
+        return trimesh.Trimesh(vertices=box.vertices, faces=box.faces[keep], process=False)
+
+    def _prepare(self, tmp_path, parts, cfg):
+        path = tmp_path / "parts.stl"
+        trimesh.util.concatenate(parts).export(file_obj=str(path), file_type="stl")
+        return inlayer.prepare_figure(str(path), cfg)
+
+    def test_holed_body_keeps_its_separate_base(self, tmp_path, fast_test_config):
+        base = trimesh.creation.cylinder(radius=12.5, height=3.0, sections=64)
+        body = self._holed_box([8.0, 8.0, 20.0], [0.0, 0.0, 12.0])
+        m = self._prepare(tmp_path, [base, body], fast_test_config)
+        # Base: 25 mm wide, 3 mm high; body: reaches up to z = 22 mm. The
+        # default repair kept only the shell with more triangles (the base).
+        assert m.extents[0] > 24.0 and m.extents[1] > 24.0
+        assert m.extents[2] > 20.0
+
+    def test_holed_large_part_survives_next_to_a_small_intact_one(self, tmp_path, fast_test_config):
+        big = self._holed_box([20.0, 20.0, 30.0], [0.0, 0.0, 0.0])
+        small = trimesh.creation.box(extents=[4.0, 4.0, 25.0])
+        small.apply_translation([20.0, 0.0, 0.0])
+        m = self._prepare(tmp_path, [big, small], fast_test_config)
+        # The default repair sorted by triangle count and kept only the 4x4 part
+        assert m.extents[0] > 30.0 and m.extents[2] > 29.0
+
+
+class TestVoxelizeSurface:
+    """_voxelize_surface replaces trimesh's subdivision voxelizer for raw input.
+
+    trimesh quarters each triangle until all edges are below pitch / 2, so a
+    long, thin triangle costs (length / pitch)² however little area it has.
+    """
+
+    @staticmethod
+    def _occupied(vox) -> set[tuple[int, int, int]]:
+        origin = np.round(vox.transform[:3, 3] / vox.transform[0, 0]).astype(int)
+        return {tuple(ix + origin) for ix in np.argwhere(vox.matrix)}
+
+    def test_matches_trimesh_on_a_regular_mesh(self):
+        sphere = trimesh.creation.icosphere(subdivisions=4, radius=10.0)
+        ours = self._occupied(inlayer._voxelize_surface(sphere, 0.5))
+        theirs = self._occupied(sphere.voxelized(pitch=0.5))
+        # Same surface, same rounding: they may differ by the odd voxel where
+        # the surface grazes a voxel boundary, not by whole layers.
+        assert len(ours ^ theirs) < 0.05 * len(theirs)
+
+    def test_face_on_a_rounding_boundary_stays_put(self):
+        """A 10 mm cube at pitch 0.4 has its faces on the .5 of the rounding;
+        one ulp of interpolation noise there flipped a whole voxel layer."""
+        cube = trimesh.creation.box(extents=[10.0, 10.0, 10.0])
+        ours = self._occupied(inlayer._voxelize_surface(cube, 0.4))
+        assert ours == self._occupied(cube.voxelized(pitch=0.4))
+
+    def test_filled_sphere_has_the_sphere_volume(self):
+        sphere = trimesh.creation.icosphere(subdivisions=4, radius=10.0)
+        ours = inlayer._voxelize_surface(sphere, 0.5)
+        ours.fill()
+        theirs = sphere.voxelized(pitch=0.5)
+        theirs.fill()
+        # A leaking shell would leave the interior empty (volume of a skin only);
+        # both count the whole boundary layer, hence trimesh as the reference
+        # rather than the analytic volume.
+        assert ours.matrix.sum() == pytest.approx(theirs.matrix.sum(), rel=0.02)
+        assert ours.matrix.sum() * 0.5**3 > 0.9 * sphere.volume
+
+    def test_long_thin_triangles_stay_cheap(self):
+        """A 256-triangle rod took 1.95 GB and 13 s through trimesh (review B17)."""
+        import tracemalloc
+
+        rod = trimesh.creation.cylinder(radius=4.0, height=120.0, sections=128)
+        tracemalloc.start()
+        vox = inlayer._voxelize_surface(rod, 0.4)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert peak < 200 * 1024**2
+        assert vox.matrix.shape[2] >= 120 / 0.4
+
+    def test_low_poly_bar_no_longer_aborts(self, tmp_path):
+        """A 12-triangle 250 mm bar ended in 'max_iter exceeded' (review B16)."""
+        bar = trimesh.creation.box(extents=[250.0, 10.0, 10.0])
+        path = tmp_path / "bar.stl"
+        bar.export(file_obj=str(path), file_type="stl")
+        m = inlayer.prepare_figure(str(path), Config(voxel_pitch=0.4, decimate_faces=1000))
+        assert m.is_watertight
+        assert m.extents[0] == pytest.approx(250.0, abs=1.0)
 
 
 class TestPrepareFigureBasic:

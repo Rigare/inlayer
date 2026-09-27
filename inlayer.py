@@ -288,31 +288,141 @@ def apply_euler_rotation(
     return m
 
 
+def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.Trimesh:
+    """Loads a file (path or file object) as a single mesh.
+
+    trimesh does not raise on an empty or garbled STL - it returns a mesh
+    without triangles, and the pipeline then fails far away with a cryptic
+    'NoneType' error. Uploads are untrusted input, so any file that yields no
+    triangles is rejected here with a message that names it.
+    """
+    try:
+        mesh = trimesh.load(source, file_type=file_type, force="mesh")
+    except Exception as exc:
+        raise ValueError(t_("error.empty_input", name=name)) from exc
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+        raise ValueError(t_("error.empty_input", name=name))
+    return mesh
+
+
+# Upper bound for a single voxel grid. The finest grid in the pipeline is
+# dilate's (voxel_pitch / 2); a boolean grid costs one byte per voxel and
+# scipy's morphology holds several copies of it. Without the bound a small
+# upload scaled up (or a tiny STL with a huge bounding box) takes down a shared
+# web-app container instead of failing with a message.
+MAX_GRID_VOXELS: Final[int] = 1_000_000_000
+
+# Sample spacing of `_voxelize_surface`, as a fraction of the pitch. Samples
+# on a row lie this far apart, rows as well, so the nearest neighbour of any
+# sample is at most sqrt(0.4² + 0.2²) = 0.45 pitch away. Below 0.5 pitch per
+# coordinate, neighbouring samples round into the same or adjacent voxels: the
+# voxel shell stays closed and fill() cannot leak - the same guarantee trimesh's
+# subdivision voxelizer gives with its pitch / 2 edge limit.
+_SURFACE_SAMPLE_SPACING: Final[float] = 0.4
+
+
+def _check_grid_size(extents: np.ndarray, pitch: float, name: str) -> None:
+    """Refuses a figure whose voxel grid at `pitch` would exceed MAX_GRID_VOXELS."""
+    voxels = float(np.prod(np.ceil(np.asarray(extents) / pitch) + 1))
+    if voxels > MAX_GRID_VOXELS:
+        raise ValueError(t_("error.grid_too_large", name=name, voxels=f"{voxels:.1e}",
+                            limit=f"{MAX_GRID_VOXELS:.1e}"))
+
+
+def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """p + t (r - p), exact at t = 0, at t = 1 and on axes where p and r agree.
+
+    Voxel indices come from rounding, and a face lying exactly on a voxel
+    boundary (a 10 mm cube at pitch 0.4) sits on the .5 of that rounding: one
+    ulp of interpolation error there flips a whole layer of voxels.
+    """
+    return np.where(t == 1.0, r, p + t * (r - p))
+
+
+def _segment_points(p0: np.ndarray, p1: np.ndarray, spacing: float) -> np.ndarray:
+    """Evenly spaced points on each segment p0[i]-p1[i], endpoints included."""
+    count = np.ceil(np.linalg.norm(p1 - p0, axis=1) / spacing).astype(np.int64) + 1
+    seg = np.repeat(np.arange(len(p0)), count)
+    step = np.arange(len(seg)) - np.repeat(np.cumsum(count) - count, count)
+    q = step / np.maximum(count[seg] - 1, 1)
+    return _lerp(p0[seg], p1[seg], q[:, None])
+
+
+def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
+    """Surface voxelization whose cost grows with area, not with edge length².
+
+    trimesh's voxelizer quarters every triangle until *all* its edges are
+    shorter than pitch / 2: a long, thin triangle (CAD exports of rods, pins,
+    profiles) costs (length / pitch)² sub-triangles however little area it has.
+    A 256-triangle rod of 40 mm took 1.95 GB, a 12-triangle 250 mm bar aborted
+    with "max_iter exceeded". Here each triangle is sampled in rows parallel to
+    its longest edge instead, plus its three edges; see _SURFACE_SAMPLE_SPACING
+    for why the shell stays closed. Only for raw input meshes - the later steps
+    voxelize marching-cubes output whose edges are about one pitch long.
+    """
+    tri = mesh.triangles
+    n = len(tri)
+    spacing = _SURFACE_SAMPLE_SPACING * pitch
+    lengths = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2)
+    # Rotate every triangle so that a-b is its longest edge: the apex c then
+    # projects onto a-b, so every row parallel to a-b stays inside the triangle.
+    order = (lengths.argmax(axis=1)[:, None] + np.arange(3)) % 3
+    a, b, c = (tri[np.arange(n), order[:, k]] for k in range(3))
+    longest = lengths.max(axis=1)
+    height = np.linalg.norm(np.cross(b - a, c - a), axis=1) / np.maximum(longest, 1e-12)
+
+    n_rows = np.ceil(height / spacing).astype(np.int64) + 1
+    row_tri = np.repeat(np.arange(n), n_rows)
+    row = np.arange(len(row_tri)) - np.repeat(np.cumsum(n_rows) - n_rows, n_rows)
+    s = (row / np.maximum(n_rows[row_tri] - 1, 1))[:, None]
+    ra, rb, rc = a[row_tri], b[row_tri], c[row_tri]
+    points = np.concatenate([
+        _segment_points(_lerp(ra, rc, s), _lerp(rb, rc, s), spacing),
+        _segment_points(b, c, spacing),
+        _segment_points(c, a, spacing),
+    ])
+
+    # Same rounding as trimesh.voxel.creation.voxelize_subdivide
+    hit = np.round(points / pitch).astype(np.int64)
+    origin = hit.min(axis=0)
+    matrix = np.zeros(hit.max(axis=0) - origin + 1, dtype=bool)
+    matrix[tuple((hit - origin).T)] = True
+    transform = trimesh.transformations.scale_and_translate(
+        scale=pitch, translate=origin * pitch
+    )
+    return cast(Any, trimesh.voxel.VoxelGrid)(matrix, transform=transform)
+
+
 def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
-    """Lädt, repariert, dezimiert und glättet die Eingabefigur."""
+    """Loads, repairs, decimates and smooths an input figure."""
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Eingabedatei nicht gefunden: {path}")
+        raise FileNotFoundError(t_("error.input_not_found", path=path))
 
     t = time.perf_counter()
     _log(t_("pipeline.load", path=path))
-    m = cast(trimesh.Trimesh, trimesh.load(path, force="mesh"))
+    m = load_mesh(path, name=path)
     if config.stl_unit_to_mm != 1.0:
         m.apply_scale(config.stl_unit_to_mm)
     _log(t_("pipeline.loaded", faces=f"{len(m.faces):,}", extents=m.extents.round(2)), t)
+    _check_grid_size(m.extents, config.voxel_pitch / 2, name=path)
 
-    # Reparatur nur, wenn sie etwas zu tun hat. pymeshfix ist der teuerste
-    # Einzelschritt vor der Voxelisierung (gemessen ~30 % von prepare_figure bei
-    # 82k Dreiecken) und laesst ein bereits wasserdichtes, konsistent gewickeltes
-    # Mesh unveraendert. Self-Intersections deckt der Test nicht ab, die loest
-    # aber ohnehin die nachfolgende Voxelisierung auf — sie rastert Dreiecke und
-    # kennt keine Topologie. Entscheidend ist Wasserdichtheit: daran haengt, ob
-    # vox.fill() den Innenraum trifft statt nach aussen zu laufen.
+    # Repair only when there is something to repair. pymeshfix is the most
+    # expensive single step before voxelization (measured ~30 % of
+    # prepare_figure at 82k triangles) and leaves a watertight, consistently
+    # wound mesh unchanged. Self-intersections are not covered by the test, but
+    # the voxelization resolves them anyway - it rasterizes triangles and knows
+    # no topology. Watertightness is what matters: it decides whether vox.fill()
+    # hits the interior instead of running outwards.
     t = _log(t_("pipeline.repair"))
     if m.is_watertight and m.is_winding_consistent:
         _log(t_("pipeline.repair_skipped", faces=f"{len(m.faces):,}"), t)
     else:
         mf = pymeshfix.MeshFix(m.vertices, m.faces)
-        mf.repair()
+        # pymeshfix's default removes every shell but the one with the most
+        # triangles: a miniature with a separate base lost the base, and a
+        # holed body next to an intact small part lost the *body*. Whether a
+        # part survived depended on an unrelated hole anywhere in the file.
+        mf.repair(remove_smallest_components=False)
         m = trimesh.Trimesh(vertices=mf.points, faces=mf.faces)
         _log(t_("pipeline.repaired", faces=f"{len(m.faces):,}"), t)
 
@@ -325,12 +435,12 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         _log(t_("pipeline.decimate_skipped", faces=f"{current_faces:,}"), t)
 
     t = _log(t_("pipeline.voxelize_closing"))
-    vox = cast(Any, m.voxelized(pitch=config.voxel_pitch))
+    vox = _voxelize_surface(m, config.voxel_pitch)
     vox.fill()
 
-    # Padding um die Closing-Iterationen: ohne Rand wird die Dilation an den
-    # Array-Grenzen geclippt und die anschliessende Erosion schrumpft die Figur
-    # an ihren Extrempunkten um bis zu 'iters' Voxel (analog zu dilate).
+    # Pad by the closing iterations: without a border the dilation is clipped
+    # at the array edges and the following erosion shrinks the figure at its
+    # extreme points by up to 'iters' voxels (same as in dilate).
     iters = 2
     padded = np.pad(vox.matrix, iters, constant_values=False)
     closed = binary_closing(padded, iterations=iters)

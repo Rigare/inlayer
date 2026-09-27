@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-from typing import cast
+
 
 import trimesh
 
@@ -52,6 +52,11 @@ def file_hash(path: str) -> str:
         for chunk in iter(lambda: f.read(_HASH_CHUNK_BYTES), b""):
             h.update(chunk)
     return h.hexdigest()[:_HASH_HEX_LEN]
+
+
+def bytes_hash(data: bytes) -> str:
+    """Same digest as `file_hash`, for content already in memory (uploads)."""
+    return hashlib.sha256(data).hexdigest()[:_HASH_HEX_LEN]
 
 
 def selection_key(axis: str) -> str:
@@ -104,14 +109,13 @@ def quantize_axis_value(axis: str, val: float, step: float) -> float:
 decimate_mesh = inlayer.decimate_mesh
 
 
-def load_preview_mesh(data: bytes, scale: float) -> trimesh.Trimesh:
-    """Laedt eine hochgeladene STL dezimiert fuer die Sofort-Vorschau."""
-    # force="mesh" garantiert ein Trimesh, der Typ von trimesh.load ist aber
-    # Geometry – gleiche cast-Konvention wie in inlayer.prepare_figure.
-    mesh = cast(
-        trimesh.Trimesh,
-        trimesh.load(io.BytesIO(data), file_type="stl", force="mesh"),
-    )
+def load_preview_mesh(data: bytes, scale: float, name: str) -> trimesh.Trimesh:
+    """Loads an uploaded STL, decimated for the instant preview.
+
+    Raises ValueError naming the file if it holds no triangles (same loader as
+    the pipeline, so preview and run reject the same files).
+    """
+    mesh = inlayer.load_mesh(io.BytesIO(data), name, file_type="stl")
     if scale != 1.0:
         mesh.apply_scale(scale)
     return decimate_mesh(mesh, PREVIEW_FACE_BUDGET)
