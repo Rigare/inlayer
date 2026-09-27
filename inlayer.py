@@ -32,6 +32,7 @@ from i18n import t as t_
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Final, Any, Iterable, TypeVar, cast
+from manifold3d import Manifold, Mesh, OpType
 from scipy.ndimage import (
     binary_closing,
     binary_dilation,
@@ -133,6 +134,11 @@ class Config:
                 t_("config.bad_layout_style", value=self.layout_style)
             )
 
+    @property
+    def effective_figure_gap(self) -> float:
+        """The wall between two cavities: figure_gap, or the wall thickness."""
+        return self.wall_thickness if self.figure_gap is None else self.figure_gap
+
 
 _DEFAULT_CFG: Final = Config()
 
@@ -166,6 +172,26 @@ MAX_PARALLEL_WORKERS: Final[int] = 4
 # bound so several voxel layers are always covered.
 FINGER_BAND_VOXELS: Final[float] = 5.0
 FINGER_BAND_MIN_MM: Final[float] = 2.0
+
+# Resolution of the revolved recess template (quarter-circle profile, turns)
+RECESS_ARC_SEGMENTS: Final[int] = 16
+RECESS_SECTIONS: Final[int] = 64
+
+# --- Box and wall check -----------------------------------------------------
+
+# Every cutter (figure cavity, recess shaft) ends this far above the box's top
+# face. Ending exactly on the face would hand the boolean coplanar faces,
+# ending below it leaves a sealed void. Larger than any sensible voxel_pitch;
+# it cuts only air, so the value does not show in the result.
+CUT_OVERSHOOT_MM: Final[float] = 1.0
+
+# The wall check measures the real meshes (float32 inside manifold3d), not a
+# voxel grid, so its tolerance only has to absorb rounding and the cylinder's
+# chord error (< 0.02 mm at ~1 mm segments).
+WALL_TOLERANCE_MM: Final[float] = 0.05
+
+# Below this a clipped cutter counts as empty (boolean slivers, not pockets)
+_MIN_VOLUME_MM3: Final[float] = 1e-3
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
@@ -451,26 +477,23 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     return m
 
 
-def _dilation_steps(distance: float, config: Config) -> tuple[int, float]:
-    """Dilations-Iterationen und tatsaechlicher Zuwachs pro Seite fuer `dilate`.
+def _dilation_iterations(distance: float, config: Config) -> int:
+    """Number of dilation steps `dilate` needs for `distance`.
 
-    Inflation: voxel_pitch/2 aus prepare_figure + pitch/2 aus der Rekonstruktion
-    in dilate. floor(x + 0.5) statt round(): Banker's Rounding wuerde den
-    Default-Fall (clearance=0.4, pitch=0.4 -> x=0.5) auf 0 abrunden. Das
-    1e-9-Epsilon faengt ab, dass dieser Fall ((0.4 - 0.3) / 0.2) durch
-    Float-Rundung knapp unter 0.5 landet.
+    Inflation: voxel_pitch/2 from prepare_figure + pitch/2 from the
+    reconstruction in dilate (pitch = voxel_pitch/2). floor(x + 0.5) instead
+    of round(): banker's rounding would round the default case (clearance 0.4,
+    pitch 0.4 -> x = 0.5) down to 0. The 1e-9 epsilon catches that this case
+    ((0.4 - 0.3) / 0.2) lands just below 0.5 through float rounding.
 
-    Der Zuwachs ist nicht `distance`: die Dilation ist auf `pitch` quantisiert
-    und die eigene Marching-Cubes-Rekonstruktion traegt nochmals pitch/2 auf.
-    Gemessen (Wuerfel und Kugel identisch, 2026-08) trifft
-    `iters * pitch + pitch / 2` den realen Bounding-Box-Zuwachs exakt. Wer den
-    Abstand zwischen dilatierten Figuren garantieren muss (siehe
-    `arrange_with_stable_bounds`), rechnet damit statt mit clearance.
+    The resulting growth per side is not `distance` but, measured (cube and
+    sphere alike, 2026-08), `iters * pitch + pitch / 2` - the dilation is
+    quantized to `pitch` and its own marching cubes adds pitch/2. Nothing
+    relies on that number any more: build_inlay measures the real cavities.
     """
     pitch = config.voxel_pitch / 2
     inflation = config.voxel_pitch / 2 + pitch / 2
-    iters = max(0, math.floor((distance - inflation) / pitch + 0.5 + 1e-9))
-    return iters, iters * pitch + pitch / 2
+    return max(0, math.floor((distance - inflation) / pitch + 0.5 + 1e-9))
 
 
 def dilate(
@@ -491,7 +514,7 @@ def dilate(
     vox.fill()
     _log(t_("pipeline.grid_ready"), t)
 
-    iters, _ = _dilation_steps(distance, config)
+    iters = _dilation_iterations(distance, config)
 
     if iters > 0:
         # Einmaliges Padding um 'iters' auf allen Seiten
@@ -516,753 +539,499 @@ def dilate(
     return result
 
 
-def arrange_figures(
-    meshes: list[trimesh.Trimesh],
+def arrange_footprints(
+    sizes: np.ndarray,
     gap: float,
     layout_style: str = "compact",
-    reference_meshes: list[trimesh.Trimesh] | None = None,
-    sorting_reference_meshes: list[trimesh.Trimesh] | None = None,
+    sort_keys: Iterable[float] | None = None,
     box_width: float | None = None,
-    finger_radius: float = 0.0,
-    finger_axis: str = "x",
-    outer_margin: float | None = None,
-) -> list[trimesh.Trimesh]:
-    """Ordnet mehrere Meshes kollisionsfrei in der XY-Ebene an.
+    margin: float = 0.0,
+) -> np.ndarray:
+    """Places rectangles in the XY plane without collisions.
 
-    layout_style kann sein:
-    - "compact": Shelf-Packing zeilenweise (Standard, absteigend nach Flaeche sortiert)
-    - "horizontal": Nebeneinander auf der X-Achse zentriert (Original-Reihenfolge)
-    - "vertical": Untereinander auf der Y-Achse zentriert (Original-Reihenfolge)
-
-    `gap` ist der Abstand zwischen den Figuren, `outer_margin` das, was bei
-    manueller `box_width` je Seite ausserhalb des Layouts dazukommt (None ->
-    `gap`). Das sind zwei verschiedene Groessen: `arrange_with_stable_bounds`
-    schlaegt auf den Gap die Dilation auf und reicht als Rand die Summe aus
-    Wandstaerke und Bounds-Padding durch.
+    `sizes` holds one (width, depth) per figure - the footprint of everything
+    that is cut for it. Returns the position of each footprint's min corner,
+    `gap` apart from its neighbours:
+    - "compact": shelf packing, largest first (by `sort_keys`, default the
+      footprint area), rows up to a target width - `box_width` minus `margin`
+      on each side when the box width is fixed.
+    - "horizontal": side by side along X, smallest first, bottoms flush.
+    - "vertical": stacked along Y in the given order, centred in X.
     """
-    if not meshes:
+    sizes = np.asarray(sizes, dtype=float).reshape(-1, 2)
+    n = len(sizes)
+    if n == 0:
         raise ValueError(t_("error.no_meshes"))
-    if len(meshes) == 1:
-        return [meshes[0].copy()]
+    keys = sizes.prod(axis=1) if sort_keys is None else np.asarray(list(sort_keys), dtype=float)
+    positions = np.zeros((n, 2))
+    if n == 1:
+        return positions
 
-    t = _log(t_("pipeline.arrange", n=len(meshes), gap=f"{gap:.1f}", style=layout_style))
-
-    # Bounding-Box-Groessen fuer das Layout ermitteln (Referenz-Meshes nutzen, falls vorhanden);
-    # entlang der Mulden-Achse beidseitig um finger_radius erweitert (Platz fuer Fingermulden)
-    ref_meshes = reference_meshes if reference_meshes is not None else meshes
-    axis = 0 if finger_axis == "x" else 1
-    fr_pad = np.zeros(3)
-    fr_pad[axis] = 2.0 * finger_radius
-    sizes = [m.extents + fr_pad for m in ref_meshes]
-
-    # Bounding-Box-Groessen fuer eine stabile Sortierung ermitteln (z.B. unrotierte Original-Modelle)
-    sort_ref_meshes = sorting_reference_meshes if sorting_reference_meshes is not None else ref_meshes
-    sort_sizes = [m.extents + fr_pad for m in sort_ref_meshes]
-
+    t = _log(t_("pipeline.arrange", n=n, gap=f"{gap:.1f}", style=layout_style))
     if layout_style == "horizontal":
-        # Sortiere Indizes nach XY-Fläche aufsteigend (kleinstes zuerst) basierend auf der Sortier-Referenz
-        order = sorted(
-            range(len(meshes)),
-            key=lambda i: sort_sizes[i][0] * sort_sizes[i][1]
-        )
-        
-        # Dict statt Liste mit None-Platzhaltern: der Rueckgabetyp bleibt
-        # list[Trimesh] ohne cast, und eine vergessene Zuweisung faellt beim
-        # Einsammeln als KeyError auf statt als None im Ergebnis.
-        placed: dict[int, trimesh.Trimesh] = {}
-        current_x = 0.0
-        for idx in order:
-            m = meshes[idx]
-            m_copy = m.copy()
-            
-            # Nutze die Bounding Box des Referenz-Meshes für die Ausrichtung
-            ref_bmin = ref_meshes[idx].bounds[0].copy()
-            if finger_radius > 0.0:
-                ref_bmin[axis] -= finger_radius
-            ref_size = sizes[idx]
-            
-            # Unten bündig ausgerichtet in Y (Referenz auf Y = 0), sequentiell in X
-            m_copy.apply_translation([
-                current_x - ref_bmin[0],
-                -ref_bmin[1],
-                0.0
-            ])
-            current_x += ref_size[0] + gap
-            placed[idx] = m_copy
-        _log(t_("pipeline.arranged_horizontal", n=len(meshes)), t)
-        return [placed[i] for i in range(len(meshes))]
+        x = 0.0
+        for i in sorted(range(n), key=lambda i: keys[i]):
+            positions[i] = (x, 0.0)
+            x += sizes[i][0] + gap
+        _log(t_("pipeline.arranged_horizontal", n=n), t)
+        return positions
+    if layout_style == "vertical":
+        y = 0.0
+        for i in range(n):
+            positions[i] = (-sizes[i][0] / 2, y)
+            y += sizes[i][1] + gap
+        _log(t_("pipeline.arranged_vertical", n=n), t)
+        return positions
 
-    elif layout_style == "vertical":
-        result_vertical = []
-        current_y = 0.0
-        for i, m in enumerate(meshes):
-            m_copy = m.copy()
-            bmin = m_copy.bounds[0].copy()
-            if finger_radius > 0.0:
-                bmin[axis] -= finger_radius
-            # Zentriert in X, sequentiell in Y
-            m_copy.apply_translation([
-                -sizes[i][0] / 2 - bmin[0],
-                current_y - bmin[1],
-                0.0
-            ])
-            current_y += sizes[i][1] + gap
-            result_vertical.append(m_copy)
-        _log(t_("pipeline.arranged_vertical", n=len(meshes)), t)
-        return result_vertical
-
+    # Rows are filled with the full footprints. Filling them with the bare
+    # figure widths and adding the finger recesses afterwards made a row of k
+    # figures 2 * (k - 1) * finger_radius wider than the box it was packed for.
+    if box_width is not None:
+        target = box_width - 2 * margin
     else:
-        # Standard: compact (Shelf-Packing)
-        # 1. Ermittle die un-dilatierten, un-expandierten Bounding-Boxen der Figuren
-        sizes_unexpanded = [m.extents for m in ref_meshes]
-        sort_sizes_unexpanded = [m.extents for m in sort_ref_meshes]
-
-        # 2. Nach XY-Fläche absteigend sortieren basierend auf der un-expandierten Sortier-Referenz
-        order = sorted(
-            range(len(meshes)),
-            key=lambda i: sort_sizes_unexpanded[i][0] * sort_sizes_unexpanded[i][1],
-            reverse=True,
-        )
-
-        if box_width is not None:
-            # Nutze die manuelle Box-Breite abzüglich Rand und Fingermulden
-            margin = gap if outer_margin is None else outer_margin
-            # Fingermulden erweitern nur entlang ihrer Achse; bei "y" bleibt die
-            # X-Breite unveraendert.
-            fr_x = 2 * finger_radius if axis == 0 else 0.0
-            target_width = max(sizes_unexpanded[order[0]][0], box_width - 2 * margin - fr_x)
-        else:
-            # Ziel-Breite für ein un-expandiertes halbwegs quadratisches Layout
-            total_area = sum(sizes_unexpanded[i][0] * sizes_unexpanded[i][1] for i in order)
-            target_width = math.sqrt(total_area) * 1.3
-            target_width = max(target_width, sizes_unexpanded[order[0]][0])
-
-        # 3. Shelf-Packing: Reihen mit un-expandierten Breiten füllen, um die Reihenzuordnung zu bestimmen
-        shelves_assignment: list[list[int]] = []
-        current_x = 0.0
-        row_items: list[int] = []
-
-        for idx in order:
-            sx = sizes_unexpanded[idx][0]
-
-            # Passt das un-expandierte Mesh noch in die aktuelle Reihe?
-            if row_items and (current_x + sx) > target_width:
-                shelves_assignment.append(row_items)
-                current_x = 0.0
-                row_items = []
-
-            row_items.append(idx)
-            current_x += sx + gap
-
-        if row_items:
-            shelves_assignment.append(row_items)
-
-        # 4. Nun die Zuweisung in die realen (mit finger_radius expandierten) Koordinaten übersetzen
-        packed: dict[int, trimesh.Trimesh] = {}
-        current_y = 0.0
-        for row in shelves_assignment:
-            current_x = 0.0
-            shelf_height = 0.0
-            for idx in row:
-                sx, sy = sizes[idx][0], sizes[idx][1]
-                m = meshes[idx].copy()
-                bmin = m.bounds[0].copy()
-                if finger_radius > 0.0:
-                    bmin[axis] -= finger_radius
-                
-                # Verschiebe an die reale X- und Y-Position
-                m.apply_translation([current_x - bmin[0], current_y - bmin[1], 0.0])
-                packed[idx] = m
-                
-                current_x += sx + gap
-                shelf_height = max(shelf_height, sy)
-            
-            current_y += shelf_height + gap
-
-        _log(
-            t_("pipeline.shelves", n=len(meshes), rows=len(shelves_assignment)), t
-        )
-        return [packed[i] for i in range(len(meshes))]
-
-
-
-def arrange_with_stable_bounds(
-    reference: list[trimesh.Trimesh],
-    rotated: list[trimesh.Trimesh],
-    dilated: list[trimesh.Trimesh],
-    config: Config = _DEFAULT_CFG,
-) -> tuple[list[trimesh.Trimesh], tuple[np.ndarray, np.ndarray], list[np.ndarray]]:
-    """Ordnet dilatierte Figuren auf einem stabilen Slot-Gitter an.
-
-    Das Slot-Gitter wird aus den Referenz-Meshes berechnet und die dilatierten
-    (ggf. rotierten) Figuren werden an den Slot-Zentren platziert (nur XY,
-    Z bleibt unveraendert). Die Web-App uebergibt als Referenz die unrotierten
-    Figuren, damit die Slots bei Rotationsaenderungen stabil bleiben; die CLI
-    uebergibt die rotierten (Rotation steht dort fix).
-
-    Der Slot-Abstand ist der konfigurierte figure_gap plus dem doppelten
-    Dilations-Zuwachs, damit die dilatierten Figuren den konfigurierten Abstand
-    tatsaechlich einhalten.
-
-    Stabil sind die *Slots*, nicht die Box: die zurueckgegebenen Bounds
-    umschliessen immer die real angeordneten Figuren. Nur so passt die Box auch
-    dann, wenn eine Rotation die Figur groesser macht als ihre unrotierte
-    Referenz.
-
-    Liefert (angeordnete dilatierte Meshes, Bounds fuer build_inlay,
-    XY-Translationen je Figur). Die Bounds sind in XY um
-    clearance + voxel_pitch (Voxel-Diskretisierungs-Ausgleich), in Z um
-    voxel_pitch/2 je Seite (Solidify-Inflation) und bei aktivierten
-    Fingermulden um finger_radius in X erweitert.
-    """
-    fr = config.finger_radius if config.enable_finger_recesses else 0.0
-    if len(reference) == 1:
-        bmin = reference[0].bounds[0]
-        bmax = reference[0].bounds[1]
-        # Kopieren wie im Multi-Pfad: der Aufrufer reicht ggf. gecachte Meshes
-        # herein, die niemand ueber diesen Rueckgabewert veraendern koennen soll.
-        arranged = [d.copy() for d in dilated]
-        translations = [np.zeros(2)]
-    else:
-        gap = config.figure_gap if config.figure_gap is not None else config.wall_thickness
-        # Die dilatierten Figuren sind pro Seite um den Dilations-Zuwachs dicker
-        # als die Referenz. Damit der konfigurierte Abstand nach der Dilation
-        # erhalten bleibt, wird der Slot-Abstand um 2*Zuwachs vergroessert.
-        # Nicht clearance verwenden: dilate quantisiert auf voxel_pitch/2 und hat
-        # eine Untergrenze, der reale Zuwachs weicht in beide Richtungen ab.
-        _, growth = _dilation_steps(config.clearance, config)
-        layout_gap = gap + 2.0 * growth
-        # Rand je Seite bei manueller Box-Breite: die Aussenwand aus build_inlay
-        # plus das Padding, das unten auf die stabilen Bounds geht. Frueher stand
-        # hier der Gap — das unterschlug das Padding und die Box lief ueber.
-        outer_margin = config.wall_thickness + config.clearance + config.voxel_pitch
-        layout = arrange_figures(
-            reference, layout_gap, config.layout_style,
-            box_width=config.box_width, finger_radius=fr,
-            finger_axis=config.finger_recess_axis, outer_margin=outer_margin,
-        )
-        layout_bounds = np.array([m.bounds for m in layout])
-        bmin = layout_bounds[:, 0, :].min(axis=0)
-        bmax = layout_bounds[:, 1, :].max(axis=0)
-        arranged, translations = [], []
-        for i, d in enumerate(dilated):
-            trans = layout[i].bounds.mean(axis=0) - rotated[i].bounds.mean(axis=0)
-            trans[2] = 0.0  # Z-Achse stabil lassen
-            d_copy = d.copy()
-            d_copy.apply_translation(trans)
-            arranged.append(d_copy)
-            translations.append(trans[:2])
-
-    pad = config.clearance + config.voxel_pitch
-    bmin = bmin - pad
-    bmax = bmax + pad
-
-    # Die Referenz ist bei der Web-App unrotiert, die real angeordneten Figuren
-    # sind es nicht. Ohne diese Vereinigung dimensioniert eine Rotation die Box
-    # nach der ungedrehten Figur und die gedrehte ragt seitlich heraus.
-    real_bounds = np.array([m.bounds for m in arranged])
-    real_min = real_bounds[:, 0, :].min(axis=0)
-    real_max = real_bounds[:, 1, :].max(axis=0)
-    bmin[:2] = np.minimum(bmin[:2], real_min[:2])
-    bmax[:2] = np.maximum(bmax[:2], real_max[:2])
-
-    # Z kommt immer aus den realen Figuren – der Slot-Versatz ist XY-only, ein
-    # Referenz-Z waere bei Rotation schlicht die falsche Hoehe. Zuschlag ist
-    # voxel_pitch/2 je Seite: genau die Inflation, die _solidify_figure beim
-    # Marching Cubes auftraegt (gemessen Wuerfel/Kugel/Zylinder identisch,
-    # 2026-08). Ohne sie faellt die Bodenwand um pitch/2 zu duenn aus, mit dem
-    # frueheren clearance + voxel_pitch war sie bis zu 2.5 mm zu dick.
-    z_pad = config.voxel_pitch / 2
-    bmin[2] = real_min[2] - z_pad
-    bmax[2] = real_max[2] + z_pad
-
-    if config.enable_finger_recesses:
-        axis = 0 if config.finger_recess_axis == "x" else 1
-        bmin[axis] -= config.finger_radius
-        bmax[axis] += config.finger_radius
-    return arranged, (bmin, bmax), translations
+        target = max(math.sqrt(float(sizes.prod(axis=1).sum())) * 1.3, float(sizes[:, 0].max()))
+    rows: list[list[int]] = [[]]
+    x = 0.0
+    for i in sorted(range(n), key=lambda i: keys[i], reverse=True):
+        if rows[-1] and x + sizes[i][0] > target:
+            rows.append([])
+            x = 0.0
+        rows[-1].append(i)
+        x += sizes[i][0] + gap
+    y = 0.0
+    for row in rows:
+        x = 0.0
+        for i in row:
+            positions[i] = (x, y)
+            x += sizes[i][0] + gap
+        y += max(sizes[i][1] for i in row) + gap
+    _log(t_("pipeline.shelves", n=n, rows=len(rows)), t)
+    return positions
 
 
 def _is_manifold(m: trimesh.Trimesh) -> bool:
-    """Prüft, ob ein Mesh manifold (wasserdicht) ist."""
+    """True for a watertight mesh with at least one face."""
     return m.is_watertight and len(m.faces) > 0
 
 
-def _solidify_figure(
-    fig: trimesh.Trimesh, config: Config,
-) -> trimesh.Trimesh:
-    """Solidifiziert eine Figur von ihrer Unterkante nach oben (hinterschnittfrei).
+def _to_manifold(mesh: trimesh.Trimesh) -> Manifold:
+    """Same conversion trimesh.boolean uses for engine='manifold'."""
+    return Manifold(Mesh(
+        vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+        tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+    ))
 
-    Füllt alle Voxel von der lokalen Unterkante (z_min) jeder Spalte bis zum
-    oberen Rand des Gitters. Dies bildet die Form der Unterseite der Figur exakt ab,
-    zieht aber alle Wände nach oben hin gerade durch, um Hinterschnitte zu vermeiden.
+
+def _to_trimesh(manifold: Manifold) -> trimesh.Trimesh:
+    mesh = manifold.to_mesh()
+    return trimesh.Trimesh(
+        vertices=mesh.vert_properties[:, :3], faces=mesh.tri_verts, process=False
+    )
+
+
+def _solidify_figure(
+    fig: trimesh.Trimesh, config: Config, top_z: float,
+) -> trimesh.Trimesh:
+    """Solidifies a figure from its underside up to `top_z` (no undercuts).
+
+    Every voxel column is filled from its lowest occupied voxel up to `top_z`:
+    the underside keeps the figure's shape, the walls go straight up. Filling
+    only up to the top of the figure's own grid sealed the cavity whenever the
+    figure ended below the box's top face (depth_fraction 1.0 with a negative
+    Z offset, a short figure lowered by hand): the print had a closed void.
     """
-    sol_vox = cast(Any, fig.voxelized(pitch=config.voxel_pitch))
-    matrix = sol_vox.matrix.copy()
+    pitch = config.voxel_pitch
+    sol_vox = cast(Any, fig.voxelized(pitch=pitch))
+    matrix = sol_vox.matrix
+    # Extend the grid upwards only - the origin sits at the bottom, so the
+    # transform stays valid (no _padded_transform: the padding is one-sided).
+    grid_top = sol_vox.transform[2, 3] + (matrix.shape[2] - 1) * pitch
+    n_extra = max(0, math.ceil((top_z - grid_top) / pitch))
+    matrix = np.pad(matrix, ((0, 0), (0, 0), (0, n_extra)), constant_values=False)
 
     nz = matrix.shape[2]
     z_coords = np.arange(nz).reshape(1, 1, nz)
     has_voxel = matrix.any(axis=2)  # (nx, ny)
-    # argmax liefert den ersten belegten Z-Index je Spalte ohne (nx,ny,nz)-grosses
-    # Zwischenarray; leere Spalten ergeben 0, werden aber durch has_voxel maskiert
+    # argmax yields the first occupied Z index per column without an
+    # (nx, ny, nz) temporary; empty columns give 0 but are masked by has_voxel
     z_min = matrix.argmax(axis=2)[:, :, np.newaxis]
-    fill_mask = has_voxel[:, :, np.newaxis] & (z_coords >= z_min)
-    matrix |= fill_mask
+    matrix |= has_voxel[:, :, np.newaxis] & (z_coords >= z_min)
 
     return _grid_to_mesh(matrix, sol_vox.transform)
 
 
+def _finger_band(pitch: float) -> float:
+    """Width of the vertex band around the grip position (see FINGER_BAND_VOXELS)."""
+    return max(FINGER_BAND_MIN_MM, FINGER_BAND_VOXELS * pitch)
+
+
+def _recess_template(config: Config) -> trimesh.Trimesh:
+    """Finger recess: a lower hemisphere with a vertical shaft on top.
+
+    The shaft reaches CUT_OVERSHOOT_MM above the box's top face once the
+    recess sits finger_recess_z_offset below it. A bare hemisphere left solid
+    material over a lowered recess: reachable only through the figure's own
+    cavity and printed as an unsupported overhang.
+    """
+    r = config.finger_radius
+    shaft = config.finger_recess_z_offset + CUT_OVERSHOOT_MM
+    angles = np.linspace(-np.pi / 2, 0.0, RECESS_ARC_SEGMENTS + 1)
+    profile = np.column_stack([r * np.cos(angles), r * np.sin(angles)])
+    profile[0, 0] = 0.0  # exactly on the axis, so the revolved bottom is closed
+    profile = np.vstack([profile, [[r, shaft], [0.0, shaft]]])
+    return trimesh.creation.revolve(profile, sections=RECESS_SECTIONS)
+
+
+def _recess_pair(
+    fig: trimesh.Trimesh, template: trimesh.Trimesh, config: Config, position: float
+) -> list[trimesh.Trimesh]:
+    """The two recesses of one figure, beside it at the grip position.
+
+    Expects the figure in build_inlay's frame (box top at z = 0). The recesses
+    sit on the figure's real silhouette at the grip position, along
+    finger_recess_axis ("x": thumb and fingers from the sides, "y": front and
+    back). `position` slides the pair along the figure, relative to its usable
+    half length (half extent minus finger_radius), so one value fits figures of
+    any size; a figure shorter than 2 * finger_radius keeps them centred.
+    """
+    axis = 0 if config.finger_recess_axis == "x" else 1
+    cross = 1 - axis
+    fb = fig.bounds
+    half_span = max(0.0, (fb[1][cross] - fb[0][cross]) / 2.0 - config.finger_radius)
+    grip = float(fb.mean(axis=0)[cross] + position * half_span)
+
+    verts = fig.vertices
+    near = verts[np.abs(verts[:, cross] - grip) < _finger_band(config.voxel_pitch)]
+    # An empty band is possible where the figure has a gap at the grip position
+    edges = (near[:, axis].min(), near[:, axis].max()) if len(near) else (fb[0][axis], fb[1][axis])
+
+    pair = []
+    for edge in edges:
+        where = np.zeros(3)
+        where[axis], where[cross], where[2] = edge, grip, -config.finger_recess_z_offset
+        recess = template.copy()
+        recess.apply_translation(where)
+        pair.append(recess)
+    return pair
+
+
+def _wall_check(
+    box: Manifold, cutters: list[Manifold], inlay: Manifold, config: Config,
+    apothem: float | None = None,
+) -> dict:
+    """Measures every wall of the finished inlay exactly, per figure.
+
+    Each figure's cutter (cavity plus its recesses) is clipped to the box;
+    for axis-parallel walls the thinnest point of a pocket is exactly its
+    bounds' distance to the box face, for the cylinder the farthest vertex
+    (a convex function peaks at a vertex). Walls between two pockets come
+    from manifold3d's min_gap. Findings name the figure (index) they belong
+    to - the old voxel check overestimated walls by up to a pitch, ignored
+    the walls between cavities and passed an inlay without any cavity.
+    """
+    wall, gap = config.wall_thickness, config.effective_figure_gap
+    tol = WALL_TOLERANCE_MM
+    bx = np.array(box.bounding_box())  # x0, y0, z0, x1, y1, z1
+    centre = (bx[:2] + bx[3:5]) / 2
+    violations: list[dict] = []
+    outer: list[float] = []
+
+    def flag(kind: str, figure: int | None, measured: float, target: float,
+             other: int | None = None) -> None:
+        violations.append({"figure": figure, "kind": kind, "measured_mm": round(float(measured), 3),
+                           "target_mm": float(target), "other": other})
+
+    clips = [cutter ^ box for cutter in cutters]
+    bounds: list[np.ndarray | None] = []
+    for i, clip in enumerate(clips):
+        if clip.is_empty() or clip.volume() < _MIN_VOLUME_MM3:
+            flag("no_cavity", i, 0.0, wall)
+            bounds.append(None)
+            continue
+        bb = np.array(clip.bounding_box())
+        bounds.append(bb)
+        if apothem is not None:
+            xy = clip.to_mesh().vert_properties[:, :2]
+            side = apothem - float(np.linalg.norm(xy - centre, axis=1).max())
+        else:
+            side = float(min(bb[0] - bx[0], bx[3] - bb[3], bb[1] - bx[1], bx[4] - bb[4]))
+        floor = float(bb[2] - bx[2])
+        outer += [side, floor]
+        if side < wall - tol:
+            flag("side", i, side, wall)
+        if floor < wall - tol:
+            flag("floor", i, floor, wall)
+
+    for i, a in enumerate(bounds):
+        for j in range(i + 1, len(bounds)):
+            b = bounds[j]
+            if a is None or b is None or np.maximum(b[:3] - a[3:], a[:3] - b[3:]).max() >= gap:
+                continue
+            if (clips[i] ^ clips[j]).volume() > _MIN_VOLUME_MM3:
+                flag("merged", i, 0.0, gap, j)
+            else:
+                measured = clips[i].min_gap(clips[j], gap)
+                if measured < gap - tol:
+                    flag("inner", i, measured, gap, j)
+
+    # An enclosed void is a separate shell with negative volume
+    for part in inlay.decompose():
+        if part.volume() < 0:
+            vb = np.array(part.bounding_box())
+            owner = next(
+                (i for i, bb in enumerate(bounds)
+                 if bb is not None and np.all(vb[:3] <= bb[3:]) and np.all(bb[:3] <= vb[3:])),
+                None,
+            )
+            flag("sealed", owner, 0.0, wall)
+
+    return {
+        "min_wall_mm": min(outer) if outer else float(wall),
+        "passes_min_wall": not violations,
+        "target_mm": float(wall),
+        "violations": violations,
+    }
+
+
 def build_inlay(
-    figure_offsets: "trimesh.Trimesh | list[trimesh.Trimesh]",
+    figures: "trimesh.Trimesh | list[trimesh.Trimesh]",
     config: Config = _DEFAULT_CFG,
     individual_offsets: list[tuple[float, float, float]] | None = None,
-    stable_global_bounds: tuple[np.ndarray, np.ndarray] | None = None,
     file_names: list[str] | None = None,
     individual_recess_positions: list[float] | None = None,
+    sorting_reference: list[trimesh.Trimesh] | None = None,
 ) -> tuple[trimesh.Trimesh, float, float, float]:
-    """Konstruiert die Box und fuehrt die Boolean-Differenz aus.
+    """Arranges the dilated figures, cuts them from a box and checks the walls.
 
-    Akzeptiert ein einzelnes Mesh (Abwaertskompatibilitaet) oder eine Liste
-    von Meshes fuer Multi-Figur-Inlays.
+    Takes one mesh or a list (the output of `dilate`, rotations already
+    applied - build_inlay never rotates). Per figure:
 
-    Die Box-Form steuert config.box_shape: "box" (Quader) oder "cylinder"
-    (Zylinder). Beim Zylinder sind die zurueckgegebenen box_w und box_d beide
-    gleich dem Durchmesser (Bounding-Box des Zylinders).
+    - **Z:** it sinks `depth_fraction` of its *own* height below the box's
+      top face, so every figure stands out by the same share of its height,
+      wherever its STL sits in Z and however tall the others are.
+    - **Cutter:** its voxel solid, filled from the underside up past the top
+      face (no undercuts, never a sealed void), plus the two finger recesses.
 
-    `individual_recess_positions` sets the finger recess position per figure
-    (same value range as `Config.finger_recess_position`); figures without an
-    entry fall back to the config value. Every other recess parameter (radius,
-    axis, Z offset) stays global - the grip point differs per figure, the hand
-    that reaches in does not.
+    The box is then dimensioned from those real cutters rather than from
+    predicted ones: voxelization shifts a cavity by up to half a pitch
+    depending on where it lies on the grid, so only measuring makes the walls
+    exact. The layout (`arrange_footprints`) spaces the cutters' footprints
+    exactly `figure_gap` apart, the box adds `wall_thickness` around them and
+    below the deepest one. Manual box dimensions replace the automatic ones;
+    walls they make too thin are reported, not silently accepted.
 
-    Hinweis: Rotationen sind zu diesem Zeitpunkt bereits in die uebergebenen
-    Meshes eingerechnet (`apply_euler_rotation` laeuft in Schritt 1 der
-    Pipeline). `build_inlay` dreht selbst nichts mehr.
+    `individual_offsets` move a figure *inside* that box - the box does not
+    follow them. `individual_recess_positions` sets the grip position per
+    figure (falling back to `Config.finger_recess_position`); radius, axis and
+    Z offset stay global because they describe the hand, not the figure.
+    `sorting_reference` (e.g. the unrotated figures) fixes the layout order so
+    it does not jump while a figure is being rotated.
+
+    Metadata on the returned inlay: `wall_check` (see `_wall_check`),
+    `violating_indices`, `placements` (per figure, the translation applied to
+    the mesh that was passed in) and `finger_recesses` (for the preview).
+    Returns (inlay, box_w, box_d, box_h); for a cylinder box_w == box_d is the
+    diameter.
     """
-    # Normalisieren: einzelnes Mesh → einelementige Liste
-    if isinstance(figure_offsets, trimesh.Trimesh):
-        figure_offsets = [figure_offsets]
-
+    if isinstance(figures, trimesh.Trimesh):
+        figures = [figures]
     # Validate up front: a value outside [-1, 1] would push a recess past the
-    # figure's footprint into a box wall, and failing after the CSG run would
-    # waste the whole build.
-    if individual_recess_positions is not None:
-        for value in individual_recess_positions:
-            if not -1.0 <= value <= 1.0:
-                raise ValueError(t_("config.bad_finger_position", value=value))
-
-    for f in figure_offsets:
+    # figure's footprint, and failing after the CSG run would waste the build.
+    for value in individual_recess_positions or []:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError(t_("config.bad_finger_position", value=value))
+    for f in figures:
         if f.bounds is None or len(f.vertices) == 0:
             raise ValueError(t_("error.empty_meshes"))
 
-    multi = len(figure_offsets) > 1
-    n_figs = len(figure_offsets)
+    n = len(figures)
+    multi = n > 1
+    wall = config.wall_thickness
 
-    # Kombinierte Bounding-Box aller Figuren
-    if stable_global_bounds is not None:
-        bmin, bmax = stable_global_bounds
-        # Box-Hoehe: depth_fraction bezieht sich auf die hoechste Figur.
-        # arrange_with_stable_bounds hat die Solidify-Inflation bereits
-        # eingerechnet, hier kommt nichts mehr dazu.
-        max_z_extent = float(bmax[2] - bmin[2])
-    else:
-        all_bounds = np.array([f.bounds for f in figure_offsets])  # (n, 2, 3)
-        bmin = all_bounds[:, 0, :].min(axis=0)
-        bmax = all_bounds[:, 1, :].max(axis=0)
-        # Ohne stabile Bounds fehlt der Ausgleich fuer die Inflation, die
-        # _solidify_figure auftraegt: die Kavitaet reicht pro Seite um
-        # voxel_pitch/2 weiter als das uebergebene Mesh, sonst faellt die
-        # Bodenwand entsprechend zu duenn aus.
-        raw_z_extent = float(all_bounds[:, 1, 2].max() - all_bounds[:, 0, 2].min())
-        max_z_extent = raw_z_extent + config.voxel_pitch
-    fig_size = bmax - bmin
-    cylinder = config.box_shape == "cylinder"
+    def entry(values, i, default):
+        return values[i] if values is not None and i < len(values) else default
 
-    # Box-Masse
-    auto_h = config.wall_thickness + config.depth_fraction * max_z_extent
-    box_h = config.box_height if config.box_height is not None else auto_h
-    label_multi = t_("pipeline.multi_suffix", n=n_figs) if multi else ""
+    offsets = [
+        np.asarray(entry(individual_offsets, i, (config.offset_x, config.offset_y, config.offset_z)),
+                   dtype=float)
+        for i in range(n)
+    ]
+    labels = [
+        f" '{file_names[i]}'" if file_names is not None and i < len(file_names)
+        else (f" ({i + 1}/{n})" if multi else "")
+        for i in range(n)
+    ]
 
-    if cylinder:
-        # Umkreis des Figuren-Rechtecks: garantiert die Wandstaerke auch an
-        # den Ecken der (unbekannt gefuellten) Bounding-Box
-        auto_diameter = float(np.hypot(fig_size[0], fig_size[1])) + 2 * config.wall_thickness
-        diameter = config.box_diameter if config.box_diameter is not None else auto_diameter
-        box_w = box_d = float(diameter)
-
-        if diameter < auto_diameter or box_h < auto_h:
-            _log(
-                t_("pipeline.warn_cylinder_small", d=f"{diameter:.1f}", h=f"{box_h:.1f}",
-                   min_d=f"{auto_diameter:.1f}", min_h=f"{auto_h:.1f}")
-            )
-
-        # Segmentlaenge ~1 mm haelt den Sehnenfehler weit unter clearance/voxel_pitch
-        sections = int(np.clip(np.pi * diameter, 64, 512))
-        box = trimesh.creation.cylinder(
-            radius=diameter / 2.0, height=box_h, sections=sections
-        )
-        _log(
-            t_("pipeline.box_cylinder", d=f"{diameter:.1f}", h=f"{box_h:.1f}",
-               suffix=label_multi,
-               mode=t_("pipeline.manual")
-               if any(v is not None for v in [config.box_diameter, config.box_height])
-               else t_("pipeline.automatic"))
-        )
-    else:
-        auto_xy = fig_size[:2] + 2 * config.wall_thickness
-        box_w = config.box_width if config.box_width is not None else auto_xy[0]
-        box_d = config.box_depth if config.box_depth is not None else auto_xy[1]
-
-        # Warnen, falls manuelle Masse zu klein
-        if box_w < auto_xy[0] or box_d < auto_xy[1] or box_h < auto_h:
-            _log(
-                t_("pipeline.warn_box_small", w=f"{box_w:.1f}", d=f"{box_d:.1f}", h=f"{box_h:.1f}",
-                   min_w=f"{auto_xy[0]:.1f}", min_d=f"{auto_xy[1]:.1f}", min_h=f"{auto_h:.1f}")
-            )
-
-        box = trimesh.creation.box(extents=[box_w, box_d, box_h])
-        _log(
-            t_("pipeline.box", w=f"{box_w:.1f}", d=f"{box_d:.1f}", h=f"{box_h:.1f}",
-               suffix=label_multi,
-               mode=t_("pipeline.manual")
-               if any(v is not None for v in [config.box_width, config.box_depth, config.box_height])
-               else t_("pipeline.automatic"))
-        )
-
-    # Positionierung: Boden bei z=0, Box zentriert ueber allen Figuren
-    center_x = (bmin[0] + bmax[0]) / 2
-    center_y = (bmin[1] + bmax[1]) / 2
-    box.apply_translation([center_x, center_y, box_h / 2])
-
-    # Absolute Box-Wandgrenzen zur Wandstärken-Verifikation
-    left_wall = center_x - box_w / 2
-    right_wall = center_x + box_w / 2
-    front_wall = center_y - box_d / 2
-    back_wall = center_y + box_d / 2
-
-    # Jede Figur in Z verschieben (Unterkante auf Bodenwand) und solidifizieren
-    placed_figs: list[trimesh.Trimesh] = []
-    fig_labels: list[str] = []
-    finger_cylinders: list[trimesh.Trimesh] = []
-    violating_indices = []
-
-    # Fingermulden-Template (untere Halbkugel) einmalig erzeugen –
-    # pro Position wird unten nur noch eine Kopie verschoben
-    recess_template: trimesh.Trimesh | None = None
-    if config.enable_finger_recesses:
-        r = config.finger_radius
-        sphere = trimesh.creation.icosphere(subdivisions=3, radius=r)
-        top_box = trimesh.creation.box(extents=[3.0 * r, 3.0 * r, 2.0 * r])
-        top_box.apply_translation([0.0, 0.0, r])
-        recess_template = cast(
-            trimesh.Trimesh,
-            trimesh.boolean.difference([sphere, top_box], engine="manifold"),
-        )
-
-    for i, fig in enumerate(figure_offsets):
-        fig = fig.copy()
+    # Frame: the box's top face at z = 0, each figure sunk by depth_fraction
+    # of its own height.
+    sink, local = [], []
+    for fig in figures:
         fb = fig.bounds
-        if individual_offsets is not None and i < len(individual_offsets):
-            ox, oy, oz = individual_offsets[i]
-        else:
-            ox, oy, oz = config.offset_x, config.offset_y, config.offset_z
+        dz = -config.depth_fraction * (fb[1][2] - fb[0][2]) - fb[0][2]
+        moved = fig.copy()
+        moved.apply_translation([0.0, 0.0, dz])
+        sink.append(dz)
+        local.append(moved)
 
-        fig_h = fb[1][2] - fb[0][2]
-        z_pos = box_h + (1 - config.depth_fraction) * max_z_extent - fig_h + oz
-        fig.apply_translation(
-            [
-                ox,
-                oy,
-                z_pos - fb[0][2],
-            ]
-        )
-
-        # Wandstärken-Vorab-Check für diese Figur zu den Box-Wänden
-        fb_placed = fig.bounds
-        d_bottom = fb_placed[0][2]  # Z-Abstand zum Boden (z=0)
-        if cylinder:
-            # Radialer Abstand des figurenfernsten Vertex zur Zylinderwand
-            r_fig = float(
-                np.linalg.norm(fig.vertices[:, :2] - [center_x, center_y], axis=1).max()
-            )
-            min_w_i = min(box_w / 2 - r_fig, d_bottom)
-        else:
-            d_left = fb_placed[0][0] - left_wall
-            d_right = right_wall - fb_placed[1][0]
-            d_front = fb_placed[0][1] - front_wall
-            d_back = back_wall - fb_placed[1][1]
-            min_w_i = min(d_left, d_right, d_front, d_back, d_bottom)
-        # Wenn Wandstärke unterschritten wird (mit 0.1 mm Voxel-Toleranz)
-        if min_w_i < (config.wall_thickness - 0.1):
-            violating_indices.append(i)
-
-        # Generate the finger recess bodies
-        if config.enable_finger_recesses and recess_template is not None:
-            # Determine the real silhouette edges of the already placed (and
-            # possibly rotated) model at the grip position.
-            # config.finger_recess_axis picks the axis the recesses lie on:
-            # "x" -> left/right (thumb and fingers grip from the sides),
-            # "y" -> front/back (natural hand position).
-            axis = 0 if config.finger_recess_axis == "x" else 1
-            cross = 1 - axis
-            global_min, global_max = None, None
-            c_placed = fb_placed.mean(axis=0)
-            verts = fig.vertices
-
-            # Where along the figure the pair of recesses sits (cross axis).
-            # finger_recess_position is relative to the usable half length, so
-            # the same setting works for figures of different sizes. Subtracting
-            # the recess radius keeps the hemisphere inside the figure's own
-            # footprint, hence away from the box walls, even at +/-1.0. For a
-            # figure shorter than 2 * finger_radius the span collapses to 0 and
-            # the recesses stay centred.
-            half_span = max(
-                0.0,
-                (fb_placed[1][cross] - fb_placed[0][cross]) / 2.0 - config.finger_radius,
-            )
-            if individual_recess_positions is not None and i < len(individual_recess_positions):
-                recess_position = individual_recess_positions[i]
-            else:
-                recess_position = config.finger_recess_position
-            grip_cross = float(c_placed[cross] + recess_position * half_span)
-
-            # Collect the vertices near that grip position along the cross axis.
-            # The band width scales with voxel_pitch (see FINGER_BAND_VOXELS) so
-            # a coarse resolution still yields enough vertices.
-            band = max(FINGER_BAND_MIN_MM, FINGER_BAND_VOXELS * config.voxel_pitch)
-            close_verts = verts[np.abs(verts[:, cross] - grip_cross) < band]
-            if len(close_verts) > 0:
-                global_min = float(close_verts[:, axis].min())
-                global_max = float(close_verts[:, axis].max())
-
-            # Fallback to the global bounds of the placed figure (an empty band
-            # is possible when the figure has a gap at the chosen position)
-            if global_min is None or global_max is None:
-                global_min = float(fb_placed[0][axis])
-                global_max = float(fb_placed[1][axis])
-
-            # Copy the hemisphere template (open at the top, radius = finger_radius)
-            cyl_a = recess_template.copy()
-            cyl_b = recess_template.copy()
-
-            # Placed at the box's top edge, lowered by the Z offset
-            z_pos = box_h - config.finger_recess_z_offset
-            pos_a = [0.0, 0.0, z_pos]
-            pos_b = [0.0, 0.0, z_pos]
-            pos_a[axis] = global_min
-            pos_b[axis] = global_max
-            pos_a[cross] = grip_cross
-            pos_b[cross] = grip_cross
-
-            cyl_a.apply_translation(pos_a)
-            cyl_b.apply_translation(pos_b)
-
-            # Tag them so the preview can identify the recesses
-            cyl_a.metadata["type"] = "finger_recess"
-            cyl_a.metadata["fig_idx"] = i
-            cyl_b.metadata["type"] = "finger_recess"
-            cyl_b.metadata["fig_idx"] = i
-
-            finger_cylinders.extend([cyl_a, cyl_b])
-
-        label = f" '{file_names[i]}'" if (file_names is not None and i < len(file_names)) else (f" ({i + 1}/{n_figs})" if multi else "")
-        placed_figs.append(fig)
-        fig_labels.append(label)
-
-    # Solidifizierung ist pro Figur unabhaengig → optional parallel
-    def _solidify_logged(idx: int) -> trimesh.Trimesh:
-        t = _log(t_("pipeline.solidify", label=fig_labels[idx]))
-        solid = _solidify_figure(placed_figs[idx], config)
+    def solidify_logged(i: int) -> trimesh.Trimesh:
+        t = _log(t_("pipeline.solidify", label=labels[i]))
+        # The Z offset is applied afterwards; fill far enough that the cavity
+        # still reaches past the top face once it has moved.
+        solid = _solidify_figure(local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2])
         _log(t_("pipeline.solidified", faces=f"{len(solid.faces):,}"), t)
         return solid
 
-    solidified = _parallel_map(
-        _solidify_logged, range(n_figs), config, what=t_("pipeline.what.solidify")
+    solids = _parallel_map(
+        solidify_logged, range(n), config, what=t_("pipeline.what.solidify")
     )
-
-    for label, solid in zip(fig_labels, solidified):
+    for label, solid in zip(labels, solids):
         if not _is_manifold(solid):
-            raise ValueError(
-                t_("error.not_manifold", label=label)
-            )
+            raise ValueError(t_("error.not_manifold", label=label))
 
-    # Vorab-Pruefung Box
-    if not _is_manifold(box):
-        raise ValueError(
-            "Box ist nicht manifold / watertight. "
-            "CSG wuerde wahrscheinlich fehlschlagen."
-        )
+    recesses: list[list[trimesh.Trimesh]] = [[] for _ in range(n)]
+    if config.enable_finger_recesses:
+        # Built once, copied per figure (AGENTS.md: reuse geometry templates)
+        template = _recess_template(config)
+        for i in range(n):
+            position = entry(individual_recess_positions, i, config.finger_recess_position)
+            recesses[i] = _recess_pair(local[i], template, config, position)
 
-    # CSG-Boolean: Box minus alle Figuren und Fingermulden
-    csg_label = (
-        t_("pipeline.csg_label_multi", n=n_figs) if multi
-        else t_("pipeline.csg_label_single")
+    # Everything cut per figure, before the manual offsets: layout and box
+    # are measured on these.
+    lo = np.array([np.min([m.bounds[0] for m in [solids[i]] + recesses[i]], axis=0) for i in range(n)])
+    hi = np.array([np.max([m.bounds[1] for m in [solids[i]] + recesses[i]], axis=0) for i in range(n)])
+    sort_keys = (
+        None if sorting_reference is None
+        else [float(np.prod(m.extents[:2])) for m in sorting_reference]
     )
+    corners = arrange_footprints(
+        hi[:, :2] - lo[:, :2], config.effective_figure_gap, config.layout_style,
+        sort_keys, config.box_width, margin=wall,
+    )
+    slots = np.zeros((n, 3))
+    slots[:, :2] = corners - lo[:, :2]
+    fp_lo = (lo[:, :2] + slots[:, :2]).min(axis=0)
+    fp_hi = (hi[:, :2] + slots[:, :2]).max(axis=0)
+    span = fp_hi - fp_lo
+    centre = (fp_lo + fp_hi) / 2
+
+    auto_h = wall - float(lo[:, 2].min())
+    box_h = config.box_height if config.box_height is not None else auto_h
+    label_multi = t_("pipeline.multi_suffix", n=n) if multi else ""
+    apothem = None
+    if config.box_shape == "cylinder":
+        # Circumcircle of the footprints' rectangle: the wall holds at its
+        # corners too, however they are filled
+        auto_diameter = float(np.hypot(*span)) + 2 * wall
+        diameter = config.box_diameter if config.box_diameter is not None else auto_diameter
+        box_w = box_d = float(diameter)
+        if diameter < auto_diameter or box_h < auto_h:
+            _log(t_("pipeline.warn_cylinder_small", d=f"{diameter:.1f}", h=f"{box_h:.1f}",
+                    min_d=f"{auto_diameter:.1f}", min_h=f"{auto_h:.1f}"))
+        # Segment length ~1 mm keeps the chord error far below any tolerance
+        sections = int(np.clip(np.pi * diameter, 64, 512))
+        box = trimesh.creation.cylinder(radius=diameter / 2.0, height=box_h, sections=sections)
+        # The prism's flat sides are the closest the wall gets to the axis
+        apothem = diameter / 2.0 * math.cos(math.pi / sections)
+        manual = config.box_diameter is not None or config.box_height is not None
+        _log(t_("pipeline.box_cylinder", d=f"{diameter:.1f}", h=f"{box_h:.1f}", suffix=label_multi,
+                mode=t_("pipeline.manual") if manual else t_("pipeline.automatic")))
+    else:
+        auto_w, auto_d = (span + 2 * wall).tolist()
+        box_w = config.box_width if config.box_width is not None else auto_w
+        box_d = config.box_depth if config.box_depth is not None else auto_d
+        if box_w < auto_w or box_d < auto_d or box_h < auto_h:
+            _log(t_("pipeline.warn_box_small", w=f"{box_w:.1f}", d=f"{box_d:.1f}", h=f"{box_h:.1f}",
+                    min_w=f"{auto_w:.1f}", min_d=f"{auto_d:.1f}", min_h=f"{auto_h:.1f}"))
+        box = trimesh.creation.box(extents=[box_w, box_d, box_h])
+        manual = any(v is not None for v in (config.box_width, config.box_depth, config.box_height))
+        _log(t_("pipeline.box", w=f"{box_w:.1f}", d=f"{box_d:.1f}", h=f"{box_h:.1f}", suffix=label_multi,
+                mode=t_("pipeline.manual") if manual else t_("pipeline.automatic")))
+    box.apply_translation([centre[0], centre[1], -box_h / 2.0])
+
+    moves = [slots[i] + offsets[i] for i in range(n)]
+    for i in range(n):
+        solids[i].apply_translation(moves[i])
+        for recess in recesses[i]:
+            # Recesses follow the figure in XY; their depth is set from the top face
+            recess.apply_translation([moves[i][0], moves[i][1], 0.0])
+
+    csg_label = t_("pipeline.csg_label_multi", n=n) if multi else t_("pipeline.csg_label_single")
     if config.enable_finger_recesses:
         csg_label += t_("pipeline.csg_label_recesses")
     t = _log(t_("pipeline.csg", label=csg_label))
     try:
-        inlay = trimesh.boolean.difference(
-            [box] + solidified + finger_cylinders, engine="manifold"
-        )
+        box_m = _to_manifold(box)
+        cutters = [
+            Manifold.batch_boolean([_to_manifold(m) for m in [solids[i]] + recesses[i]], OpType.Add)
+            for i in range(n)
+        ]
+        inlay_m = box_m - Manifold.batch_boolean(cutters, OpType.Add)
+        inlay = _to_trimesh(inlay_m)
     except Exception as exc:
-        raise RuntimeError(
-            t_("error.csg_failed")
-        ) from exc
-
-    if inlay is None or len(inlay.faces) == 0:
-        raise ValueError(
-            t_("error.csg_empty")
-        )
-
+        raise RuntimeError(t_("error.csg_failed")) from exc
+    if len(inlay.faces) == 0:
+        raise ValueError(t_("error.csg_empty"))
     _log(t_("pipeline.csg_result", faces=f"{len(inlay.faces):,}"), t)
 
-    # Verschiebe das Inlay so, dass die linke vordere Ecke der Box bei (0, 0, 0) liegt.
-    shift_x = (bmin[0] + bmax[0]) / 2 - box_w / 2
-    shift_y = (bmin[1] + bmax[1]) / 2 - box_d / 2
-    inlay.apply_translation([-shift_x, -shift_y, 0.0])
+    wall_check = _wall_check(box_m, cutters, inlay_m, config, apothem)
 
-    # Speichere verletzende Indizes und Fingermulden-Meshes in den Metadaten des Inlays
-    inlay.metadata["violating_indices"] = violating_indices
-    # Die Z-Ausdehnung, mit der die Figuren platziert wurden. Die 3D-Vorschau
-    # der Web-App muss damit rechnen statt sie nachzubilden, sonst zeichnet sie
-    # die Figuren auf einer anderen Hoehe als die tatsaechliche Kavitaet.
-    inlay.metadata["max_z_extent"] = max_z_extent
+    # Box corner to the origin
+    shift = np.array([centre[0] - box_w / 2.0, centre[1] - box_d / 2.0, -box_h])
+    inlay.apply_translation(-shift)
+    inlay.metadata["wall_check"] = wall_check
+    inlay.metadata["violating_indices"] = sorted(
+        {v["figure"] for v in wall_check["violations"] if v["figure"] is not None}
+    )
+    inlay.metadata["placements"] = [
+        np.array([0.0, 0.0, sink[i]]) + moves[i] - shift for i in range(n)
+    ]
     if config.enable_finger_recesses:
-        # Kopie der Zylinder verschieben, um mit dem Inlay ausgerichtet zu sein
-        shifted_recesses = []
-        for cyl in finger_cylinders:
-            cyl_copy = cyl.copy()
-            cyl_copy.apply_translation([-shift_x, -shift_y, 0.0])
-            shifted_recesses.append(cyl_copy)
-        inlay.metadata["finger_recesses"] = shifted_recesses
+        shown = []
+        for i in range(n):
+            for recess in recesses[i]:
+                recess.apply_translation(-shift)
+                recess.metadata["type"] = "finger_recess"
+                recess.metadata["fig_idx"] = i
+                shown.append(recess)
+        inlay.metadata["finger_recesses"] = shown
 
-    # Voxelgitter des Hohlraums fuer die Wandstaerkenpruefung aufbauen
-    pitch = config.voxel_pitch
-    nx = max(1, int(round(box_w / pitch)))
-    ny = max(1, int(round(box_d / pitch)))
-    nz = max(1, int(round(box_h / pitch)))
-    cavity_grid = np.zeros((nx, ny, nz), dtype=bool)
-
-    shifted_cutouts = [m.copy() for m in (solidified + finger_cylinders)]
-    for m in shifted_cutouts:
-        m.apply_translation([-shift_x, -shift_y, 0.0])
-        vox = cast(Any, m.voxelized(pitch=pitch))
-        vox.fill()
-        origin = vox.transform[:3, 3]
-        gx0 = int(round(origin[0] / pitch))
-        gy0 = int(round(origin[1] / pitch))
-        gz0 = int(round(origin[2] / pitch))
-        shape = vox.matrix.shape
-
-        gx1 = min(nx, gx0 + shape[0])
-        gy1 = min(ny, gy0 + shape[1])
-        gz1 = min(nz, gz0 + shape[2])
-
-        gx0_c = max(0, gx0)
-        gy0_c = max(0, gy0)
-        gz0_c = max(0, gz0)
-
-        sx0 = gx0_c - gx0
-        sy0 = gy0_c - gy0
-        sz0 = gz0_c - gz0
-
-        sx1 = gx1 - gx0
-        sy1 = gy1 - gy0
-        sz1 = gz1 - gz0
-
-        # Nur Zellen uebernehmen, die vollstaendig in den Bounds DIESER Figur liegen.
-        # Randzellen sind durch die Voxelisierung aufgeblaeht und wuerden sonst eine
-        # zu duenne Wand vortaeuschen. Die Begrenzung darf nur den Bereich dieser
-        # Figur betreffen – ein globales Loeschen wuerde bereits eingetragene
-        # Figuren wieder ausradieren (Multi-Figur-Inlays).
-        mb = m.bounds
-        lo = [
-            max(0, gx0_c, int(np.ceil(mb[0][0] / pitch))),
-            max(0, gy0_c, int(np.ceil(mb[0][1] / pitch))),
-            max(0, gz0_c, int(np.ceil(mb[0][2] / pitch))),
-        ]
-        hi = [
-            min(gx1, int(np.floor(mb[1][0] / pitch))),
-            min(gy1, int(np.floor(mb[1][1] / pitch))),
-            min(gz1, int(np.floor(mb[1][2] / pitch))),
-        ]
-
-        if all(lo[i] < hi[i] for i in range(3)):
-            src = tuple(slice(lo[i] - (gx0, gy0, gz0)[i], hi[i] - (gx0, gy0, gz0)[i]) for i in range(3))
-            dst = tuple(slice(lo[i], hi[i]) for i in range(3))
-            cavity_grid[dst] |= vox.matrix[src]
-
-    inlay.metadata["cavity_grid"] = cavity_grid
-
-    return inlay, box_w, box_d, box_h
+    return inlay, float(box_w), float(box_d), float(box_h)
 
 
-def wall_thickness_stats_3d(
-    inlay: trimesh.Trimesh, config: Config = _DEFAULT_CFG
-) -> dict:
-    """Berechnet die minimale Wandstärke der Box-Außenwände (Seitenwände und Boden).
+def wall_thickness_stats_3d(inlay: trimesh.Trimesh) -> dict:
+    """Returns (and logs) the wall check `build_inlay` ran on this inlay.
 
-    Bei box_shape="cylinder" wird der radiale Abstand zur Mantelfläche statt
-    der Distanz zum X/Y-Gitterrand verwendet.
-
-    Bewusst nur das Minimum: Mittel-/Maximalwerte der Voxel-Distanzen wären
-    Kavitätstiefen, keine Wandstärken, und damit irreführend.
+    Keys: `min_wall_mm` (thinnest side or floor wall), `passes_min_wall`
+    (no finding at all), `target_mm` and `violations` - one entry per finding
+    with the figure index, its kind ("side", "floor", "inner", "merged",
+    "sealed", "no_cavity"), the measured and the target value in mm and, for
+    walls between two cavities, the other figure. The target of "inner" and
+    "merged" is the figure gap, of every other kind the wall thickness.
     """
     t = _log(t_("pipeline.wall_verify"))
+    check = getattr(inlay, "metadata", {}).get("wall_check")
+    if check is None:
+        raise ValueError(t_("error.no_wall_check"))
+    _log(t_("pipeline.min_wall", measured=f"{check['min_wall_mm']:.2f}", target=check["target_mm"]), t)
+    return dict(check)
 
-    pitch = config.voxel_pitch
-    if hasattr(inlay, "metadata") and "cavity_grid" in inlay.metadata:
-        matrix = inlay.metadata["cavity_grid"]
-        cavity = matrix.copy()
-        nx, ny, nz = cavity.shape
-    elif inlay.bounds is None or len(inlay.vertices) == 0:
-        cavity = np.zeros((1, 1, 1), dtype=bool)
-        nx = ny = nz = 1
-    else:
-        vox = cast(Any, inlay.voxelized(pitch=pitch))
-        vox.fill()
-        matrix = vox.matrix
-        nx, ny, nz = matrix.shape
-        cavity = ~matrix
 
-    # Distanz jedes Voxels (in Voxel-Einheiten) zur naechsten Aussenwand;
-    # die Oberseite ist offen. Achsenweise Distanzfelder werden zu einem
-    # 3D-Feld kombiniert – nur ein Gitter-grosses Array statt einer
-    # Index-Liste pro Hohlraum-Voxel.
-    if config.box_shape == "cylinder":
-        cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
-        dx = np.arange(nx, dtype=np.float32) - cx
-        dy = np.arange(ny, dtype=np.float32) - cy
-        r_grid = (min(nx, ny) - 1) / 2.0
-        d_side = r_grid - np.sqrt(dx[:, None] ** 2 + dy[None, :] ** 2)  # (nx, ny)
-        cavity = cavity & ((d_side >= 0.5)[:, :, None])
-        az = np.arange(nz, dtype=np.float32)
-        wall_vox = np.minimum(d_side[:, :, None], az[None, None, :])
-    else:
-        ax = np.minimum(np.arange(nx), nx - 1 - np.arange(nx)).astype(np.int32)
-        ay = np.minimum(np.arange(ny), ny - 1 - np.arange(ny)).astype(np.int32)
-        az = np.arange(nz, dtype=np.int32)
-        wall_vox = np.minimum(ax[:, None, None], ay[None, :, None])
-        wall_vox = np.minimum(wall_vox, az[None, None, :])
+# Exit code of the CLI when the wall check fails. Not 2: argparse exits with 2
+# on a usage error, and a script must be able to tell the two apart.
+EXIT_CHECK_FAILED: Final[int] = 3
 
-    n_cavity = int(cavity.sum())
-    if n_cavity > 0:
-        raw_min = pitch * float(np.min(wall_vox, where=cavity, initial=nx + ny + nz))
-        min_wall = round(raw_min / pitch) * pitch if raw_min >= 0 else raw_min
-    else:
-        min_wall = float(config.wall_thickness)
 
-    _log(
-        t_("pipeline.min_wall", measured=f"{min_wall:.2f}", target=config.wall_thickness),
-        t,
+def describe_violation(violation: dict, names: list[str]) -> str:
+    """One readable line per wall-check finding, naming the figure(s)."""
+    def name(i: int | None) -> str:
+        return names[i] if i is not None and i < len(names) else f"#{'?' if i is None else i + 1}"
+
+    return t_(
+        f"check.{violation['kind']}",
+        name=name(violation["figure"]), other=name(violation["other"]),
+        measured=f"{violation['measured_mm']:.2f}", target=f"{violation['target_mm']:.2f}",
     )
-
-    return {
-        "min_wall_mm": min_wall,
-        "passes_min_wall": min_wall >= (config.wall_thickness - 0.1),  # Voxel-Toleranz
-        "target_mm": config.wall_thickness,
-    }
 
 
 # --- CLI --------------------------------------------------------------------
@@ -1396,48 +1165,56 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    config = Config(
-        clearance=args.clearance,
-        wall_thickness=args.wall_thickness,
-        depth_fraction=args.depth_fraction,
-        voxel_pitch=args.voxel_pitch,
-        decimate_faces=args.decimate_faces,
-        stl_unit_to_mm=args.scale,
-        box_shape=args.box_shape,
-        box_width=args.box_width,
-        box_depth=args.box_depth,
-        box_height=args.box_height,
-        box_diameter=args.box_diameter,
-        offset_x=args.offset_x,
-        offset_y=args.offset_y,
-        offset_z=args.offset_z,
-        figure_gap=args.figure_gap,
-        layout_style=args.layout_style,
-        enable_finger_recesses=args.finger_recesses,
-        finger_radius=args.finger_radius,
-        finger_recess_axis=args.finger_recess_axis,
-        finger_recess_z_offset=args.finger_recess_z_offset,
-        finger_recess_position=args.finger_recess_position[0],
-        enable_parallel=args.parallel,
-    )
-
     input_paths = args.input
-    multi = len(input_paths) > 1
-    t_total = time.perf_counter()
 
-    # One value applies to every figure, otherwise one value per input file -
-    # anything else is a silent mismatch between flags and files.
+    # Everything that can be rejected is rejected here, before minutes of
+    # voxel work: argparse then prints a usage error instead of a traceback.
+    # One recess position applies to every figure, otherwise one per input
+    # file - only checked when recesses are on, the flag does nothing else.
     recess_positions = list(args.finger_recess_position)
+    for value in recess_positions:
+        if not -1.0 <= value <= 1.0:
+            parser.error(t_("config.bad_finger_position", value=value))
     if len(recess_positions) == 1:
         recess_positions = recess_positions * len(input_paths)
     elif len(recess_positions) != len(input_paths):
-        parser.error(
-            t_("cli.error.recess_position_count",
-               given=len(recess_positions), n=len(input_paths))
+        if args.finger_recesses:
+            parser.error(
+                t_("cli.error.recess_position_count",
+                   given=len(recess_positions), n=len(input_paths))
+            )
+        print(t_("cli.recess_position_ignored"))
+    try:
+        config = Config(
+            clearance=args.clearance,
+            wall_thickness=args.wall_thickness,
+            depth_fraction=args.depth_fraction,
+            voxel_pitch=args.voxel_pitch,
+            decimate_faces=args.decimate_faces,
+            stl_unit_to_mm=args.scale,
+            box_shape=args.box_shape,
+            box_width=args.box_width,
+            box_depth=args.box_depth,
+            box_height=args.box_height,
+            box_diameter=args.box_diameter,
+            offset_x=args.offset_x,
+            offset_y=args.offset_y,
+            offset_z=args.offset_z,
+            figure_gap=args.figure_gap,
+            layout_style=args.layout_style,
+            enable_finger_recesses=args.finger_recesses,
+            finger_radius=args.finger_radius,
+            finger_recess_axis=args.finger_recess_axis,
+            finger_recess_z_offset=args.finger_recess_z_offset,
+            enable_parallel=args.parallel,
         )
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    # Schritt 1: Alle Figuren vorbereiten (optional parallel)
+    multi = len(input_paths) > 1
+    t_total = time.perf_counter()
+
+    # Step 1: prepare every figure (optionally in parallel)
     label = (t_("cli.label.figures", n=len(input_paths)) if multi
              else t_("cli.label.figure"))
     print(t_("cli.step1", label=label))
@@ -1450,46 +1227,37 @@ if __name__ == "__main__":
         apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
     ]
 
-    # Schritt 2: Toleranz-Offset pro Figur (optional parallel)
+    # Step 2: tolerance offset per figure (optionally in parallel)
     print(t_("cli.step2"))
     dilated_meshes = _parallel_map(
         lambda fig: dilate(fig, config.clearance, config),
         rotated, config, what=t_("pipeline.what.dilate"),
     )
 
-    # Schritt 2b: Stabile Anordnung + Box-Bounds (geteilte Logik mit der Web-App).
-    # Referenz sind die rotierten Figuren: die Rotation steht per CLI-Flag fest,
-    # die Box soll die gedrehte Figur umschliessen.
-    if multi:
-        gap = config.figure_gap if config.figure_gap is not None else config.wall_thickness
-        print(t_("cli.step2b", n=len(dilated_meshes), gap=f"{gap:.1f}", style=config.layout_style))
-    dilated_meshes, stable_bounds, _ = arrange_with_stable_bounds(
-        rotated, rotated, dilated_meshes, config
-    )
-
-    # Schritt 3: Inlay konstruieren (Multi-Mesh oder Single)
+    # Step 3: arrange, cut and check (build_inlay does all three)
     print(t_("cli.step3"))
     inlay, box_w, box_d, box_h = build_inlay(
-        dilated_meshes, config, stable_global_bounds=stable_bounds,
-        individual_recess_positions=recess_positions,
+        dilated_meshes, config, file_names=input_paths,
+        individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
     )
     inlay.export(file_obj=args.output, file_type="stl")
     print(t_("cli.saved", path=args.output))
 
-    # Schritt 4: Wandstärke prüfen
+    # Step 4: wall check
     print(t_("cli.step4"))
-    stats_3d = wall_thickness_stats_3d(inlay, config)
+    stats_3d = wall_thickness_stats_3d(inlay)
 
     print()
-    if not stats_3d["passes_min_wall"]:
-        print(
-            t_("cli.warn_thin", wall=config.wall_thickness,
-               measured=f"{stats_3d['min_wall_mm']:.2f}")
-        )
+    if stats_3d["passes_min_wall"]:
+        print(t_("cli.success", wall=config.wall_thickness))
     else:
-        print(
-            t_("cli.success", wall=config.wall_thickness)
-        )
+        print(t_("cli.warn_thin", wall=config.wall_thickness,
+                 measured=f"{stats_3d['min_wall_mm']:.2f}"))
+        for violation in stats_3d["violations"]:
+            print("  - " + describe_violation(violation, input_paths))
+        print(t_("cli.check_failed", path=args.output, code=EXIT_CHECK_FAILED))
 
     print("\n" + t_("cli.total_time", seconds=f"{time.perf_counter() - t_total:.1f}"))
+    if not stats_3d["passes_min_wall"]:
+        sys.exit(EXIT_CHECK_FAILED)
 

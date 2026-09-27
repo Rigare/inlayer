@@ -31,6 +31,13 @@ DYNAMIC_KEYS = (
     "app.layout.compact",
     "app.layout.horizontal",
     "app.layout.vertical",
+    # inlayer.describe_violation: t_(f"check.{kind}")
+    "check.side",
+    "check.floor",
+    "check.inner",
+    "check.merged",
+    "check.sealed",
+    "check.no_cavity",
 )
 
 

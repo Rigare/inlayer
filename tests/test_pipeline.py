@@ -26,7 +26,7 @@ class TestFullPipeline:
         fig = inlayer.prepare_figure(cube_stl_path, fast_test_config)
         fig_ot = inlayer.dilate(fig, fast_test_config.clearance, fast_test_config)
         inlay, w, d, h = inlayer.build_inlay(fig_ot, fast_test_config)
-        stats = inlayer.wall_thickness_stats_3d(inlay, fast_test_config)
+        stats = inlayer.wall_thickness_stats_3d(inlay)
 
         assert inlay.is_watertight or len(inlay.faces) > 0
         assert stats["passes_min_wall"] is True
@@ -43,7 +43,7 @@ class TestFullPipeline:
         fig = inlayer.prepare_figure(sphere_stl_path, fast_test_config)
         fig_ot = inlayer.dilate(fig, fast_test_config.clearance, fast_test_config)
         inlay, *_ = inlayer.build_inlay(fig_ot, fast_test_config)
-        stats = inlayer.wall_thickness_stats_3d(inlay, fast_test_config)
+        stats = inlayer.wall_thickness_stats_3d(inlay)
         assert stats["passes_min_wall"] is True
 
     def test_inlay_exports_to_stl(self, cube_stl_path, fast_test_config, tmp_path):
@@ -202,8 +202,32 @@ class TestCLI:
         assert result.returncode != 0
         assert "--finger-recess-position" in result.stderr
 
-    def test_cli_recess_position_out_of_range_fails(self, cube_stl_path, tmp_path):
-        """A position beyond +/-1.0 is rejected before anything is written."""
+    def test_cli_recess_position_out_of_range_fails(self, cube_stl_path, sphere_stl_path, tmp_path):
+        """Every value is checked while parsing - the second one used to fail
+        only inside build_inlay, with a traceback after minutes of work."""
+        out = tmp_path / "inlay.stl"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path, sphere_stl_path,
+                "-o", str(out),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+                "--finger-recesses",
+                "--finger-recess-position", "0.5", "2.0",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 2  # argparse usage error
+        assert "Traceback" not in result.stderr
+        assert "[1/4]" not in result.stdout  # no pipeline step ran
+        assert not out.exists()
+
+    def test_cli_recess_count_is_only_checked_with_recesses(self, cube_stl_path, tmp_path):
+        """Without --finger-recesses the positions have no effect: a note, no error."""
         out = tmp_path / "inlay.stl"
         result = subprocess.run(
             [
@@ -213,15 +237,52 @@ class TestCLI:
                 "-o", str(out),
                 "-vp", "1.0",
                 "--decimate-faces", "1000",
-                "--finger-recesses",
-                "--finger-recess-position", "2.0",
+                "--finger-recess-position", "0.1", "0.2", "0.3",
             ],
             capture_output=True,
             text=True,
             timeout=120,
         )
-        assert result.returncode != 0
-        assert not out.exists()
+        assert result.returncode == 0, result.stderr
+        assert "ignored" in result.stdout
+
+    def test_cli_failed_check_exits_with_3_and_names_the_file(self, cube_stl_path, tmp_path):
+        """A thin wall used to end in exit code 0 and printable scrap."""
+        out = tmp_path / "inlay.stl"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path,
+                "-o", str(out),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+                "--box-width", "14",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 3, result.stdout
+        assert "cube.stl" in result.stdout and "side wall" in result.stdout
+        assert out.exists()  # written anyway, to be inspected
+
+    def test_cli_passing_check_exits_with_0(self, cube_stl_path, tmp_path):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "inlayer.py"),
+                "-i", cube_stl_path,
+                "-o", str(tmp_path / "inlay.stl"),
+                "-vp", "1.0",
+                "--decimate-faces", "1000",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Success" in result.stdout
 
     def test_cli_missing_input_fails(self, tmp_path):
         result = subprocess.run(
@@ -242,7 +303,7 @@ class TestCLI:
         assert "nicht gefunden" in combined or "FileNotFoundError" in combined
 
     def test_cli_invalid_param_fails(self, cube_stl_path, tmp_path):
-        # clearance darf nicht negativ sein -> Config-Validierung wirft ValueError.
+        """An invalid value is a usage error naming the field, not a traceback."""
         result = subprocess.run(
             [
                 sys.executable,
@@ -255,10 +316,9 @@ class TestCLI:
             text=True,
             timeout=30,
         )
-        assert result.returncode != 0
-        assert "ValueError" in result.stderr or "clearance" in (
-            result.stdout + result.stderr
-        )
+        assert result.returncode == 2
+        assert "clearance" in result.stderr
+        assert "Traceback" not in result.stderr
 
 
 @pytest.mark.slow
@@ -273,14 +333,10 @@ class TestMultiFigurePipeline:
         ot1 = inlayer.dilate(fig1, fast_test_config.clearance, fast_test_config)
         ot2 = inlayer.dilate(fig2, fast_test_config.clearance, fast_test_config)
 
-        gap = fast_test_config.wall_thickness
-        arranged = inlayer.arrange_figures([ot1, ot2], gap)
-        assert len(arranged) == 2
-
-        inlay, w, d, h = inlayer.build_inlay(arranged, fast_test_config)
+        inlay, w, d, h = inlayer.build_inlay([ot1, ot2], fast_test_config)
         assert len(inlay.faces) > 0
 
-        stats = inlayer.wall_thickness_stats_3d(inlay, fast_test_config)
+        stats = inlayer.wall_thickness_stats_3d(inlay)
         assert stats["passes_min_wall"] is True
 
     def test_cli_multi_input(self, cube_stl_path, sphere_stl_path, tmp_path):

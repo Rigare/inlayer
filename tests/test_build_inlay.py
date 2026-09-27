@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 
 import numpy as np
@@ -10,6 +11,7 @@ import trimesh
 
 import inlayer
 from inlayer import Config
+from tests import geometry_probe as gp
 
 
 class TestBuildInlayBasic:
@@ -32,24 +34,29 @@ class TestBuildInlayBasic:
 
 
 class TestBuildInlayAutoDimensions:
-    def test_auto_xy_includes_wall_thickness(self, dilated_cube, fast_test_config):
-        # Auto-XY = Figur-XY + 2 * wall_thickness
-        fig_size = dilated_cube.extents
-        _, w, d, _ = inlayer.build_inlay(dilated_cube, fast_test_config)
-        expected_w = fig_size[0] + 2 * fast_test_config.wall_thickness
-        expected_d = fig_size[1] + 2 * fast_test_config.wall_thickness
-        assert w == pytest.approx(expected_w, abs=1e-6)
-        assert d == pytest.approx(expected_d, abs=1e-6)
+    """The box is measured around the real cavity, not predicted from the figure.
 
-    def test_auto_height_uses_depth_fraction(self, dilated_cube, fast_test_config):
-        # Auto-H = wall_thickness + depth_fraction * (fig_z + voxel_pitch).
-        # Der voxel_pitch-Aufschlag gleicht die Inflation aus, die
-        # _solidify_figure beim Marching Cubes auftraegt – ohne ihn faellt die
-        # Bodenwand um voxel_pitch/2 duenner aus als konfiguriert.
-        fig_z = dilated_cube.extents[2] + fast_test_config.voxel_pitch
-        _, _, _, h = inlayer.build_inlay(dilated_cube, fast_test_config)
-        expected = fast_test_config.wall_thickness + fast_test_config.depth_fraction * fig_z
-        assert h == pytest.approx(expected, abs=1e-6)
+    The old formulas (figure + 2 * wall, wall + depth_fraction * (height +
+    pitch)) were exactly what these tests asserted - and the walls came out
+    1.75 mm or 2.5 mm instead of 2.0, because voxelization shifts a cavity by
+    up to half a pitch depending on where it lies on the grid.
+    """
+
+    def test_auto_box_leaves_exactly_the_wall_around_the_cavity(self, dilated_cube, fast_test_config):
+        inlay, w, d, h = inlayer.build_inlay(dilated_cube, fast_test_config)
+        wall = fast_test_config.wall_thickness
+        assert w >= dilated_cube.extents[0] + 2 * wall
+        assert d >= dilated_cube.extents[1] + 2 * wall
+        walls = gp.outer_walls(inlay, w, d, h)
+        assert walls["side"] == pytest.approx(wall, abs=inlayer.WALL_TOLERANCE_MM)
+        assert walls["floor"] == pytest.approx(wall, abs=inlayer.WALL_TOLERANCE_MM)
+
+    def test_auto_height_sinks_depth_fraction_of_the_figure(self, dilated_cube, fast_test_config):
+        inlay, w, d, h = inlayer.build_inlay(dilated_cube, fast_test_config)
+        x, y, _ = dilated_cube.bounds.mean(axis=0) + inlay.metadata["placements"][0]
+        depth = h - gp.pocket_floor(inlay, x, y, h)
+        expected = fast_test_config.depth_fraction * dilated_cube.extents[2]
+        assert expected <= depth <= expected + fast_test_config.voxel_pitch
 
 
 class TestBuildInlayManualOverrides:
@@ -68,24 +75,14 @@ class TestBuildInlayManualOverrides:
         assert h == pytest.approx(fig_size[2] + 5.0, abs=1e-6)
 
     def test_partial_override_keeps_auto(self, dilated_cube, fast_test_config):
-        # Nur box_width manuell setzen; box_depth/box_height sollen automatisch sein.
-        fig_size = dilated_cube.extents
-        manual_w = fig_size[0] + 20.0
-        cfg = Config(
-            wall_thickness=fast_test_config.wall_thickness,
-            depth_fraction=fast_test_config.depth_fraction,
-            voxel_pitch=fast_test_config.voxel_pitch,
-            box_width=manual_w,
-        )
+        # Only box_width is manual; box_depth/box_height stay automatic.
+        manual_w = dilated_cube.extents[0] + 20.0
+        _, _, auto_d, auto_h = inlayer.build_inlay(dilated_cube, fast_test_config)
+        cfg = dataclasses.replace(fast_test_config, box_width=manual_w)
         _, w, d, h = inlayer.build_inlay(dilated_cube, cfg)
         assert w == pytest.approx(manual_w, abs=1e-6)
-        # d/h folgen weiterhin der Auto-Berechnung
-        assert d == pytest.approx(fig_size[1] + 2 * cfg.wall_thickness, abs=1e-6)
-        assert h == pytest.approx(
-            cfg.wall_thickness
-            + cfg.depth_fraction * (fig_size[2] + cfg.voxel_pitch),
-            abs=1e-6,
-        )
+        assert d == pytest.approx(auto_d, abs=1e-6)
+        assert h == pytest.approx(auto_h, abs=1e-6)
 
     def test_undersized_box_emits_warning(self, dilated_cube, fast_test_config, capsys):
         # Eine viel zu kleine Box muss eine WARN-Zeile auf stdout produzieren
@@ -119,23 +116,23 @@ class TestBuildInlayInvalidGeometry:
 
 
 class TestBuildInlayOffsets:
-    def test_offset_changes_inlay_bounds(self, dilated_cube, fast_test_config):
-        # Mit einem Offset, der die Figur aus der Box schiebt, muss das Ergebnis
-        # eine andere (groessere/kleinere) Aussparung aufweisen.
-        cfg_zero = fast_test_config
-        cfg_off = Config(
-            clearance=fast_test_config.clearance,
-            wall_thickness=fast_test_config.wall_thickness,
-            depth_fraction=fast_test_config.depth_fraction,
-            voxel_pitch=fast_test_config.voxel_pitch,
-            decimate_faces=fast_test_config.decimate_faces,
-            offset_z=2.0,
+    def test_offset_moves_the_cavity_inside_a_fixed_box(self, dilated_cube, fast_test_config):
+        """The offset moves the cavity by exactly that much; the box stays.
+
+        The previous version only asserted that both inlays had faces, so a
+        pipeline that ignored the offsets passed it (review N4).
+        """
+        plain = inlayer.build_inlay(dilated_cube, fast_test_config)
+        moved = inlayer.build_inlay(
+            dilated_cube, dataclasses.replace(fast_test_config, offset_x=1.0, offset_z=-1.0)
         )
-        inlay_zero, *_ = inlayer.build_inlay(dilated_cube, cfg_zero)
-        inlay_off, *_ = inlayer.build_inlay(dilated_cube, cfg_off)
-        # Beide muessen valide Meshes sein; das Volumen darf sich aber unterscheiden.
-        assert len(inlay_zero.faces) > 0
-        assert len(inlay_off.faces) > 0
+        assert moved[1:] == pytest.approx(plain[1:], abs=1e-6)
+        (before,) = gp.cavities(*plain)
+        (after,) = gp.cavities(*moved)
+        shift = np.array(after.bounding_box()) - np.array(before.bounding_box())
+        # x: whole pocket moves; z: the floor moves, the open top stays clipped
+        np.testing.assert_allclose(shift[[0, 3]], 1.0, atol=1e-3)
+        assert shift[2] == pytest.approx(-1.0, abs=1e-3)
 
 
 class TestBuildInlaySignature:
@@ -149,6 +146,16 @@ class TestBuildInlaySignature:
     def test_no_individual_rotations_parameter(self):
         params = inspect.signature(inlayer.build_inlay).parameters
         assert "individual_rotations" not in params
+
+    def test_no_stable_global_bounds_parameter(self):
+        """build_inlay dimensions the box itself, from the real cavities.
+
+        Box sizing used to be split between the caller (stable bounds) and
+        build_inlay; the documented call without them got neither the XY
+        compensation nor room for the finger recesses.
+        """
+        params = inspect.signature(inlayer.build_inlay).parameters
+        assert "stable_global_bounds" not in params
 
     def test_rejects_individual_rotations_keyword(self, dilated_cube, fast_test_config):
         # Ein Aufrufer, der den alten Parameter uebergibt, soll scheitern statt
@@ -165,15 +172,11 @@ class TestBuildInlayMultiMesh:
     """Tests fuer Multi-Mesh-Eingabe (Liste von Figuren)."""
 
     def test_multi_mesh_returns_valid_inlay(self, dilated_cube, dilated_sphere, fast_test_config):
-        """Zwei Meshes als Liste ergeben ein gueltiges Inlay."""
-        # Meshes nebeneinander platzieren, damit sie nicht ueberlappen
-        arranged = inlayer.arrange_figures(
-            [dilated_cube, dilated_sphere], gap=fast_test_config.wall_thickness
-        )
-        inlay, w, d, h = inlayer.build_inlay(arranged, fast_test_config)
+        """Two meshes (unarranged - build_inlay lays them out) give two pockets."""
+        inlay, w, d, h = inlayer.build_inlay([dilated_cube, dilated_sphere], fast_test_config)
         assert isinstance(inlay, trimesh.Trimesh)
-        assert len(inlay.faces) > 0
-        assert w > 0 and d > 0 and h > 0
+        assert len(gp.cavities(inlay, w, d, h)) == 2
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is True
 
     def test_single_mesh_list_same_as_single(self, dilated_cube, fast_test_config):
         """[mesh] als Liste muss dasselbe Ergebnis wie mesh allein liefern."""
@@ -185,21 +188,16 @@ class TestBuildInlayMultiMesh:
         # Face-Count kann leicht abweichen (Kopie vs. Original), aber Groessenordnung gleich
         assert abs(len(inlay_single.faces) - len(inlay_list.faces)) < 100
 
-    def test_multi_mesh_box_encompasses_all(self, dilated_cube, dilated_sphere, fast_test_config):
-        """Box muss gross genug fuer alle Figuren sein."""
-        arranged = inlayer.arrange_figures(
-            [dilated_cube, dilated_sphere], gap=fast_test_config.wall_thickness
-        )
-        _, w, d, h = inlayer.build_inlay(arranged, fast_test_config)
-
-        # Kombinierte XY-Ausdehnung berechnen
-        import numpy as np
-        all_bounds = np.array([m.bounds for m in arranged])
-        combined_size = all_bounds[:, 1, :].max(axis=0) - all_bounds[:, 0, :].min(axis=0)
-        min_w = combined_size[0] + 2 * fast_test_config.wall_thickness
-        min_d = combined_size[1] + 2 * fast_test_config.wall_thickness
-        assert w >= min_w - 0.5, f"Box-Breite {w:.1f} < Mindest {min_w:.1f}"
-        assert d >= min_d - 0.5, f"Box-Tiefe {d:.1f} < Mindest {min_d:.1f}"
+    def test_placements_put_every_figure_inside_the_box(self, dilated_cube, dilated_sphere, fast_test_config):
+        """`placements` is what the preview draws with; it must match the cut."""
+        figs = [dilated_cube, dilated_sphere]
+        inlay, w, d, h = inlayer.build_inlay(figs, fast_test_config)
+        for fig, placement in zip(figs, inlay.metadata["placements"]):
+            lo, hi = fig.bounds + placement
+            wall = fast_test_config.wall_thickness
+            assert lo[0] >= wall and lo[1] >= wall and hi[0] <= w - wall and hi[1] <= d - wall
+            assert lo[2] >= wall
+            assert hi[2] > h  # stands out of the box by (1 - depth_fraction)
 
     def test_build_inlay_individual_offsets(self, dilated_cube, dilated_sphere, fast_test_config):
         """Prueft, ob individuelle Offsets pro Figur korrekt angewendet werden."""
@@ -221,21 +219,13 @@ class TestBuildInlayCylinder:
         with pytest.raises(ValueError):
             Config(box_shape="hexagon")
 
-    def test_auto_diameter_is_enclosing_circle(self, dilated_cube, fast_test_config):
-        # Auto-Durchmesser = Umkreis der Figuren-XY-Bounds + 2 * wall_thickness
-        cfg = Config(
-            wall_thickness=fast_test_config.wall_thickness,
-            depth_fraction=fast_test_config.depth_fraction,
-            voxel_pitch=fast_test_config.voxel_pitch,
-            box_shape="cylinder",
-        )
-        fig_size = dilated_cube.extents
+    def test_auto_diameter_encloses_the_cavity_with_the_wall(self, dilated_cube, fast_test_config):
+        # Circumcircle of the cavity's footprint plus 2 * wall_thickness
+        cfg = dataclasses.replace(fast_test_config, box_shape="cylinder")
         inlay, w, d, h = inlayer.build_inlay(dilated_cube, cfg)
-        expected = float(np.hypot(fig_size[0], fig_size[1])) + 2 * cfg.wall_thickness
-        assert w == pytest.approx(expected, abs=1e-6)
-        assert d == pytest.approx(expected, abs=1e-6)
-        assert isinstance(inlay, trimesh.Trimesh)
-        assert len(inlay.faces) > 0
+        assert w == d
+        assert w >= float(np.hypot(*dilated_cube.extents[:2])) + 2 * cfg.wall_thickness
+        assert gp.cylinder_side_wall(inlay) >= cfg.wall_thickness - inlayer.WALL_TOLERANCE_MM
 
     def test_inlay_bounds_match_diameter(self, dilated_cube, fast_test_config):
         # Die Bounding-Box des Zylinder-Inlays entspricht Durchmesser x Durchmesser x Hoehe
@@ -304,23 +294,11 @@ class TestBuildInlayCylinder:
         assert 0 in inlay.metadata["violating_indices"]
 
     def test_multi_mesh_cylinder(self, dilated_cube, dilated_sphere, fast_test_config):
-        arranged = inlayer.arrange_figures(
-            [dilated_cube, dilated_sphere], gap=fast_test_config.wall_thickness
-        )
-        cfg = Config(
-            wall_thickness=fast_test_config.wall_thickness,
-            depth_fraction=fast_test_config.depth_fraction,
-            voxel_pitch=fast_test_config.voxel_pitch,
-            box_shape="cylinder",
-        )
-        inlay, w, d, h = inlayer.build_inlay(arranged, cfg)
-        assert len(inlay.faces) > 0
+        cfg = dataclasses.replace(fast_test_config, box_shape="cylinder")
+        inlay, w, d, h = inlayer.build_inlay([dilated_cube, dilated_sphere], cfg)
         assert w == d
-        # Umkreis muss die kombinierte XY-Ausdehnung umschliessen
-        all_bounds = np.array([m.bounds for m in arranged])
-        combined = all_bounds[:, 1, :].max(axis=0) - all_bounds[:, 0, :].min(axis=0)
-        min_diameter = float(np.hypot(combined[0], combined[1])) + 2 * cfg.wall_thickness
-        assert w >= min_diameter - 0.5
+        assert gp.cylinder_side_wall(inlay) >= cfg.wall_thickness - inlayer.WALL_TOLERANCE_MM
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is True
 
 
 class TestBuildInlayFingerRecesses:
@@ -342,54 +320,55 @@ class TestBuildInlayFingerRecesses:
             assert ext[0] == pytest.approx(3.0, abs=0.1)
             assert ext[1] == pytest.approx(3.0, abs=0.1)
 
-    def test_finger_recesses_subtracts_volume(self, dilated_cube):
-        """Prueft, ob Fingermulden das Volumen des Inlays reduzieren (CSG Subtraktion)."""
-        cfg_no = Config(
-            voxel_pitch=1.0,
-            enable_finger_recesses=False,
-            wall_thickness=4.0,
-        )
-        cfg_yes = Config(
-            voxel_pitch=1.0,
-            enable_finger_recesses=True,
-            finger_radius=1.5,
-            wall_thickness=4.0,
-        )
-        inlay_no, *_ = inlayer.build_inlay(dilated_cube, cfg_no)
-        inlay_yes, *_ = inlayer.build_inlay(dilated_cube, cfg_yes)
-        # Mit Fingermulden muss das Volumen geringer sein, da Material subtrahiert wurde
-        assert inlay_yes.volume < inlay_no.volume
+    def test_finger_recesses_remove_material(self, dilated_cube):
+        """The recesses are cut: more is removed from the box than without them."""
+        base = dict(voxel_pitch=1.0, wall_thickness=4.0)
+        removed = []
+        for enabled in (False, True):
+            inlay, w, d, h = inlayer.build_inlay(
+                dilated_cube, Config(**base, enable_finger_recesses=enabled, finger_radius=1.5)
+            )
+            removed.append(w * d * h - inlay.volume)
+        assert removed[1] > removed[0]
 
-    def test_finger_recesses_flush_with_top(self, dilated_cube):
-        """Prueft, ob die Fingermulden-Halbkugeln in Z-Richtung buendig mit der Oberkante des Inlays abschliessen (Z-Max bei h, Z-Min bei h - r)."""
+    def test_recess_reaches_through_the_top_face(self, dilated_cube):
+        """Hemisphere r below the top face, shaft up through it (never a roof)."""
         r = 1.5
-        cfg = Config(
-            voxel_pitch=1.0,
-            enable_finger_recesses=True,
-            finger_radius=r,
-            wall_thickness=4.0,
-        )
+        cfg = Config(voxel_pitch=1.0, enable_finger_recesses=True, finger_radius=r, wall_thickness=4.0)
         inlay, w, d, h = inlayer.build_inlay(dilated_cube, cfg)
-        recesses = inlay.metadata["finger_recesses"]
-        for hemi in recesses:
-            # Die flache Oberseite der Halbkugel liegt exakt bei box_h
-            assert hemi.bounds[1][2] == pytest.approx(h, abs=1e-3)
-            # Die Unterseite der Halbkugel liegt genau r Millimeter darunter
-            assert hemi.bounds[0][2] == pytest.approx(h - r, abs=1e-3)
+        for recess in inlay.metadata["finger_recesses"]:
+            assert recess.bounds[1][2] == pytest.approx(h + inlayer.CUT_OVERSHOOT_MM, abs=1e-3)
+            assert recess.bounds[0][2] == pytest.approx(h - r, abs=1e-3)
+
+    def test_recess_template_is_a_closed_hemisphere_with_shaft(self):
+        cfg = Config(enable_finger_recesses=True, finger_radius=5.0, finger_recess_z_offset=3.0)
+        template = inlayer._recess_template(cfg)
+        shaft = cfg.finger_recess_z_offset + inlayer.CUT_OVERSHOOT_MM
+        assert template.is_volume
+        np.testing.assert_allclose(template.bounds, [[-5, -5, -5], [5, 5, shaft]], atol=1e-6)
+        expected = 2 / 3 * np.pi * 5**3 + np.pi * 5**2 * shaft
+        assert template.volume == pytest.approx(expected, rel=0.01)
 
     def test_search_band_scales_with_voxel_pitch(self):
-        """Das Suchband fuer die Muldenposition waechst mit dem voxel_pitch.
+        """At a coarse pitch fewer vertices lie near the grip position; a fixed
+        band would make the position noisy. The floor stays FINGER_BAND_MIN_MM."""
+        assert inlayer._finger_band(0.1) == inlayer.FINGER_BAND_MIN_MM
+        assert inlayer._finger_band(2.0) == pytest.approx(inlayer.FINGER_BAND_VOXELS * 2.0)
+        assert inlayer._finger_band(2.0) > inlayer.FINGER_BAND_MIN_MM
 
-        Bei grobem Pitch liegen weniger Vertices nahe der Y-Mitte; ein fixes
-        Band wuerde die Position verrauschen. Untergrenze bleibt FINGER_BAND_MIN_MM.
-        """
-        assert inlayer.FINGER_BAND_VOXELS > 0
-        assert inlayer.FINGER_BAND_MIN_MM > 0
-        fein = max(inlayer.FINGER_BAND_MIN_MM, inlayer.FINGER_BAND_VOXELS * 0.1)
-        grob = max(inlayer.FINGER_BAND_MIN_MM, inlayer.FINGER_BAND_VOXELS * 2.0)
-        # Feiner Pitch faellt auf die Untergrenze, grober Pitch skaliert darueber hinaus.
-        assert fein == inlayer.FINGER_BAND_MIN_MM
-        assert grob > fein
+    def test_build_inlay_uses_the_search_band(self, dilated_cube, monkeypatch):
+        """Not a re-implementation of the formula: build_inlay really calls it."""
+        pitches = []
+        original = inlayer._finger_band
+
+        def spy(pitch):
+            pitches.append(pitch)
+            return original(pitch)
+
+        monkeypatch.setattr(inlayer, "_finger_band", spy)
+        cfg = Config(voxel_pitch=1.0, enable_finger_recesses=True, finger_radius=1.5, wall_thickness=4.0)
+        inlayer.build_inlay(dilated_cube, cfg)
+        assert pitches == [1.0]
 
     def test_recesses_positioned_at_figure_edges(self, dilated_cube):
         """Die Mulden sitzen links und rechts der Figur, nicht an derselben Stelle."""
@@ -444,7 +423,8 @@ class TestBuildInlayFingerRecesses:
         )
         inlay, w, d, h = inlayer.build_inlay(dilated_cube, cfg)
         for hemi in inlay.metadata["finger_recesses"]:
-            assert hemi.bounds[1][2] == pytest.approx(h - offset, abs=1e-3)
+            # The shaft still reaches through the top face
+            assert hemi.bounds[1][2] == pytest.approx(h + inlayer.CUT_OVERSHOOT_MM, abs=1e-3)
             assert hemi.bounds[0][2] == pytest.approx(h - offset - r, abs=1e-3)
 
     def test_recess_axis_validation(self):
@@ -493,7 +473,7 @@ class TestBuildInlayFingerRecesses:
         # Sliding along the figure must not sink the recesses (that is z_offset's job)
         assert h_shifted == pytest.approx(h, abs=1e-6)
         for hemi in inlay_shifted.metadata["finger_recesses"]:
-            assert hemi.bounds[1][2] == pytest.approx(h_shifted, abs=1e-3)
+            assert hemi.bounds[0][2] == pytest.approx(h_shifted - r, abs=1e-3)
 
     def test_recess_position_is_symmetric_around_the_centre(self, dilated_cube):
         """-p and +p mirror each other around the centred position."""
@@ -608,10 +588,9 @@ class TestBuildInlayIndividualRecessPositions:
     def test_each_figure_gets_its_own_position(self, dilated_cube, dilated_sphere):
         """Two figures, two different grip points in one inlay."""
         figs = [dilated_cube, dilated_sphere]
-        arranged = inlayer.arrange_figures(figs, gap=4.0)
-        centred, *_ = inlayer.build_inlay(arranged, Config(**self.CFG))
+        centred, *_ = inlayer.build_inlay(figs, Config(**self.CFG))
         mixed, *_ = inlayer.build_inlay(
-            arranged, Config(**self.CFG), individual_recess_positions=[1.0, 0.0]
+            figs, Config(**self.CFG), individual_recess_positions=[1.0, 0.0]
         )
 
         centred_by_fig = self._by_figure(centred)

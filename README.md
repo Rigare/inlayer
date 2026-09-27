@@ -187,7 +187,7 @@ The web app is a full GUI with live preview:
 | 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis and depth; the position along the figure is set **per figure**) |
 | ⚡ **Multi-threading** | Optionally process several figures in parallel across CPU cores (checkbox in the sidebar) |
 | 📐 **Box overrides** | Optionally force fixed box dimensions |
-| 🔍 **3D wall thickness check** | Automatic check with colour-coded warnings, stat cards and a pointer to the affected figures |
+| 🔍 **Wall check** | Every wall is measured on the finished geometry — sides, floor and the walls between cavities; each finding names its figure |
 | 👁️ **3D preview** | Interactive Plotly viewer (rotate, zoom, show/hide) |
 | 📥 **STL download** | Download the finished inlay as an STL |
 
@@ -236,9 +236,20 @@ python inlayer.py --lang de -i figure.stl -o inlay.stl
 python inlayer.py --help
 ```
 
-The console shows progress messages, per-step timings and the wall thickness
-check (warning if the minimum is not met). With several figures an extra
-arrangement step (`2b`) appears.
+The console shows progress messages, per-step timings and the wall check.
+If the check fails, every finding is listed with its file name (e.g.
+`fig2.stl: side wall 1.40 mm (target 2.00 mm)`) and the STL is still written so
+you can inspect it.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Inlay written, wall check passed |
+| `2` | Invalid arguments (argparse usage error) — nothing was computed |
+| `3` | Inlay written, but the wall check found problems |
+
+All `--finger-recess-position` values are validated while parsing. Their count
+(one, or one per `-i` file) only matters with `--finger-recesses`; without it
+the positions have no effect and a note says so.
 
 ---
 
@@ -249,14 +260,21 @@ The suite (`tests/`) covers config validation, every pipeline step individually
 (`app_helpers.py`), the translation table and both rendered UI languages,
 end-to-end runs and the CLI.
 
+`tests/test_geometry_invariants.py` measures the **finished inlay** instead of
+checking formulas: side and floor walls equal `wall_thickness`, the wall
+between two cavities equals `figure_gap`, every figure gets a pocket of its own
+depth, no cavity is sealed, no finger recess breaks through. The measuring
+helpers (`tests/geometry_probe.py`: manifold3d booleans, ray casts, `min_gap`)
+know nothing about how the pipeline built the part.
+
 ```powershell
 # Install test dependencies (once)
 pip install -r requirements-dev.txt
 
-# Full suite (~18 s)
+# Full suite (~70 s)
 pytest
 
-# Fast unit tests only (skips slow end-to-end / CLI runs)
+# Faster: skips end-to-end / CLI runs and the finest-pitch geometry checks
 pytest -m "not slow"
 
 # A single file or test
@@ -286,8 +304,8 @@ keep a runner busy.
 
 ## 🔧 Pipeline
 
-`inlayer.py` runs the following steps (step 2b only with several figures). Each
-figure can optionally be rotated beforehand via `apply_euler_rotation`:
+`inlayer.py` runs the following steps. Each figure can optionally be rotated
+beforehand via `apply_euler_rotation`:
 
 ```
 STL file(s)
@@ -307,25 +325,29 @@ STL file(s)
 └──────────────────────┬───────────────────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  2b. arrange_with_stable_bounds                                  │
-│     collision-free XY arrangement on a stable slot grid          │
-│     (compact / horizontal / vertical, adjustable gap)            │
-└──────────────────────┬───────────────────────────────────────────┘
-                       ▼
-┌──────────────────────────────────────────────────────────────────┐
 │  3. build_inlay                                                  │
-│     construct cuboid or cylinder, boolean difference via         │
-│     manifold3d (all figures at once, box dimensions automatic    │
-│     or manual, optional finger recesses as cut-outs)             │
+│     sink every figure by depth_fraction of its own height,       │
+│     solidify it up through the top face (+ finger recesses),     │
+│     arrange the real cavities figure_gap apart (compact /        │
+│     horizontal / vertical), build the cuboid or cylinder around  │
+│     them, boolean difference via manifold3d, exact wall check    │
 └──────────────────────┬───────────────────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  4. wall_thickness_stats_3d                                      │
-│     compute 3D wall thickness from the cavity grid of step 3     │
-│     and check it against wall_thickness                          │
+│     report the check of step 3: thinnest wall, findings per      │
+│     figure (side, floor, between cavities, sealed, no cavity)    │
 └──────────────────────┬───────────────────────────────────────────┘
                        ▼
                    inlay.stl
+```
+
+Library use follows the same order:
+
+```python
+fig = inlayer.apply_euler_rotation(inlayer.prepare_figure("figure.stl", cfg), 0, 0, 90)
+inlay, w, d, h = inlayer.build_inlay([inlayer.dilate(fig, cfg.clearance, cfg)], cfg)
+report = inlayer.wall_thickness_stats_3d(inlay)   # also in inlay.metadata["wall_check"]
 ```
 
 ---
@@ -341,7 +363,7 @@ sidebar).
 |---|---|---|
 | `clearance` | 0.4 mm | Clearance between figure and cavity |
 | `wall_thickness` | 2.0 mm | Minimum side and floor wall thickness |
-| `depth_fraction` | 0.7 | Fraction of the figure's height inside the cavity (30 % stands proud) |
+| `depth_fraction` | 0.7 | Fraction of **each** figure's own height inside its cavity (30 % stands proud) |
 
 ### Mesh processing
 
@@ -393,8 +415,12 @@ sidebar).
 | `finger_recess_z_offset` / `--finger-recess-z-offset` | 0.0 mm | How far the recesses sit below the box's top edge (e.g. to touch only the cap on keycaps) |
 | `finger_recess_position` / `--finger-recess-position` | 0.0 | Position of the recesses **along** the figure, `-1.0` … `1.0` (`0.0` = centre; web-app slider: −100 … +100 %). Set **per figure** — see below |
 
-> With finger recesses enabled the box grows by `2 × finger_radius` along the
-> recess axis, so the recesses lie entirely within the box walls.
+> With finger recesses enabled the box encloses the recesses in **both** axes —
+> including figures narrower than the recess — and keeps `wall_thickness` below
+> the deepest recess (the automatic box height grows if necessary; with a
+> manual height a recess that would break through is reported by the wall
+> check). A recess lowered by `finger_recess_z_offset` gets a vertical shaft up
+> to the top face, so it stays open and prints without an overhang.
 
 > The recesses are placed where the figure is widest at the grip position (across
 > the recess axis). The width of that search band scales with `voxel_pitch`
@@ -421,7 +447,8 @@ sidebar).
 >   or one value per `-i` file, in that order. Any other count is an error rather
 >   than a guess.
 > - **API:** `build_inlay(..., individual_recess_positions=[...])` — figures
->   without an entry fall back to `Config.finger_recess_position`.
+>   without an entry fall back to `Config.finger_recess_position`. App and CLI
+>   always pass the per-figure list.
 
 ### Language (optional)
 
@@ -455,18 +482,19 @@ sidebar).
 
 - **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `VOXEL_PITCH` raises memory use by roughly 8×.
 - **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore calls `apply_transform(vox.transform)` manually after every `marching_cubes` call.
-- **CSG engine:** boolean operations explicitly use `engine='manifold'` (`manifold3d`). manifold3d already parallelises internally across cores.
+- **CSG engine:** boolean operations run in `manifold3d` (directly, never trimesh's default engine). manifold3d already parallelises internally across cores.
 - **Multi-threading:** the optional parallelisation (`--parallel` / web-app checkbox) uses a `ThreadPoolExecutor` — numpy/scipy/trimesh release the GIL during their C calls, so threads give real multi-core speedup without process overhead. With parallelisation enabled, log lines from individual figures can interleave.
 - **Decimation is serialised:** `fast_simplification` (also behind `trimesh.simplify_quadric_decimation`) loads the mesh into process-global state. Concurrent calls from several threads therefore hand *every* caller the same mesh — with `--parallel` this produced an inlay whose cavities all showed the same figure. All decimation now goes through `inlayer.decimate_mesh` behind a lock; only the remaining steps (voxelisation, dilation, solidification) still run in parallel.
 - **Language and threads:** the selected language lives in a `ContextVar`, not a module global, so two Streamlit sessions cannot overwrite each other's choice. `ThreadPoolExecutor` workers start with a fresh context and do *not* inherit it — `_parallel_map` therefore captures the language and re-applies it inside each worker, otherwise parallel steps would log in the default language.
-- **Figure gap vs. dilation:** `figure_gap` refers to the distance between the *dilated* figures, i.e. the wall between two cavities. The slot grid is therefore spaced wider than the configured value by twice the dilation growth — at identical settings the box comes out correspondingly larger than before this correction. The growth is derived from `dilate` (quantised to `voxel_pitch/2`, with a lower bound) rather than equated with `clearance`: at `clearance < voxel_pitch/4` the allowance would otherwise be too small and the cavities would run into each other. With a manually set box width, shelf packing reserves wall thickness **plus** padding on each side — fewer figures may fit per row, but the box keeps its specified size.
-- **Box dimensions follow the rotated figure:** the web app uses the *unrotated* figures as the layout reference so slots do not jump while rotating. Only the slots are stable, though — the box dimensions come from the figures as actually arranged. Previously they came from the unrotated reference too: a figure rotated by 90° got a box sized for its unrotated extent, stuck out at the sides and floated well above the floor. Consequence of the fix: box dimensions now visibly change when a rotation makes the figure larger or smaller.
-- **Box height and floor wall:** `depth_fraction` refers to the figure height plus `voxel_pitch`. The allowance compensates for the inflation that the marching-cubes reconstruction in `_solidify_figure` applies to the cavity — without it the floor comes out `voxel_pitch/2` thinner than configured. This used to include the full bounds padding (`clearance + voxel_pitch` per side), which made the floor about 1 mm too thick at default settings and over 2 mm at a coarse pitch. At identical settings the box therefore comes out slightly flatter than before this correction.
+- **Measured, not predicted:** `build_inlay` solidifies every figure first and then arranges and dimensions the box from those real cavities. Voxelisation shifts a cavity by up to half a `voxel_pitch` depending on where it lies on the grid, so every box sized from a predicted allowance was off by that much: side walls came out 1.75–2.4 mm and floors 2.2–2.6 mm for a 2 mm target, and the wall between two cavities `figure_gap − voxel_pitch`. Now side and floor walls are `wall_thickness` and the wall between cavities is `figure_gap` — the invariant tests measure exactly that. At identical settings boxes can therefore come out slightly smaller or larger than before.
+- **Box height:** every figure sinks `depth_fraction` of its own height below the top face, wherever its STL sits in Z. The floor is `wall_thickness` under the deepest cavity; shorter figures sit on a thicker floor. Previously all figures were aligned at their tops against the tallest one — a short figure next to a tall one got no pocket at all, and two figures at different Z origins produced a solid block.
+- **Rotation and layout:** the layout uses the rotated figures, so rotated cavities never overlap; the web app uses the unrotated figures only to keep the *order* stable while you rotate. Previously the slots came from the unrotated figures and a rotation could merge two cavities.
+- **Manual offsets** move a figure inside a box that stays put; walls made too thin that way are reported by the check.
+- **Cavities stay open:** each cavity is extruded up through the top face. With `depth_fraction = 1.0` and a negative Z offset the pocket used to close at the top — a sealed void in the print.
 - **Repair only when needed:** `prepare_figure` skips `pymeshfix` when the loaded mesh is already watertight **and** consistently wound — the normal case for cleanly exported STLs. That halves the step's runtime (measured 1.99 s → 1.08 s at 82k triangles) and does not change the geometry. Watertightness alone is not a sufficient criterion: a mesh with inverted faces is watertight but would corrupt the subsequent voxel fill. When the repair does run, it keeps **every** shell of the file: pymeshfix's default drops all but the shell with the most triangles, so a miniature with a separate base used to lose the base as soon as the file had a single hole anywhere.
 - **Low-poly meshes:** input meshes are voxelised by sampling each triangle in rows along its longest edge, so the cost follows the surface area. trimesh's own voxeliser subdivides until *every* edge is below `voxel_pitch / 2`, which costs (edge length / pitch)² per triangle — the long, thin triangles of CAD exports (rods, pins, profiles) took gigabytes or aborted with "max_iter exceeded". A figure whose voxel grid would exceed `MAX_GRID_VOXELS` (10⁹ voxels at `voxel_pitch / 2`, the finest grid in the pipeline) is refused with a message suggesting a larger pitch, instead of exhausting the machine's memory.
 - **Broken files:** an empty or unreadable STL is rejected with a message naming the file. In the web app the instant preview skips such a file with a warning and still shows the others.
-- **Wall thickness tolerance:** `wall_thickness_stats_3d` tolerates 0.1 mm below target to account for voxel discretisation.
-- **Wall check without voxelising the inlay:** `build_inlay` builds the cavity grid (`inlay.metadata["cavity_grid"]`) directly from the subtracted figures. `wall_thickness_stats_3d` uses that grid and no longer has to voxelise the finished inlay itself — which saved double-digit gigabytes of RAM and several minutes of runtime on large figures. The old voxel path remains as a fallback only for inlays without this metadata (e.g. STLs loaded directly).
+- **Wall check:** measured exactly on the meshes (manifold3d) while `build_inlay` still has every figure's cutter: side and floor walls per figure, the wall between each pair of cavities, sealed voids and figures without a cavity. Each finding names its figure; `passes_min_wall` is true only without any finding. The tolerance is 0.05 mm (float rounding, the cylinder's chord error). The earlier voxel-based check overestimated walls by up to one pitch, ignored the walls between cavities and passed an inlay without any cavity.
 
 ---
 

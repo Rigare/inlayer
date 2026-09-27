@@ -22,7 +22,6 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 import trimesh
@@ -691,9 +690,6 @@ if enable_manual_rotations:
     _axis_row("rot_y", t("app.rot_y.label"), 0.0, max_rot, rot_step, t("app.rot_y.help"))
     _axis_row("rot_z", t("app.rot_z.label"), 0.0, max_rot, rot_step, t("app.rot_z.help"))
 
-offset_x = st.session_state["offset_x"] if enable_manual_offsets else 0.0
-offset_y = st.session_state["offset_y"] if enable_manual_offsets else 0.0
-offset_z = st.session_state["offset_z"] if enable_manual_offsets else 0.0
 
 
 def _params_snapshot() -> dict:
@@ -785,16 +781,12 @@ if run_btn:
             box_depth=box_depth,
             box_height=box_height,
             box_diameter=box_diameter,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            offset_z=offset_z,
             figure_gap=figure_gap,
             layout_style=layout_style,
             enable_finger_recesses=enable_finger_recesses,
             finger_radius=finger_radius,
             finger_recess_axis=finger_recess_axis,
             finger_recess_z_offset=finger_recess_z_offset,
-            finger_recess_position=finger_recess_position,
             enable_parallel=enable_parallel,
         )
 
@@ -864,50 +856,27 @@ if run_btn:
             )
 
         if enable_parallel and is_multi:
-            fig_offsets = _parallel_map_app(_dilate_one, list(range(n_files)))
+            dilated = _parallel_map_app(_dilate_one, list(range(n_files)))
         else:
-            fig_offsets = [_dilate_one(i) for i in range(n_files)]
+            dilated = [_dilate_one(i) for i in range(n_files)]
 
-        # Schritt 2b: Stabile Anordnung + Box-Bounds (geteilte Logik mit der CLI).
-        # Referenz sind die unrotierten Figuren, damit Slots und Box-Masse bei
-        # Rotationsaenderungen einzelner Figuren stabil bleiben.
-        if is_multi:
-            gap = config.figure_gap if config.figure_gap is not None else config.wall_thickness
-            progress.progress(0.55, text=t("app.progress.step2b", n=n_files))
-            t_step = logger.log(t("app.log.arrange", n=n_files, gap=f"{gap:.1f}",
-                                  style=config.layout_style), t_step)
-        fig_offsets, stable_global_bounds, auto_xy_translations = (
-            inlayer.arrange_with_stable_bounds(
-                unrotated_fig_meshes, fig_meshes, fig_offsets, config
-            )
-        )
-
-        # xy_translations und z_offsets für Speicherung/Visualisierung setzen (Auto-Anordnung + manueller Offset)
-        xy_translations = [
-            auto_xy_translations[i] + np.array([individual_offsets[i][0], individual_offsets[i][1]])
-            for i in range(n_files)
-        ]
-        z_offsets = [individual_offsets[i][2] for i in range(n_files)]
-
-        # Schritt 3: Inlay konstruieren
+        # Step 3: build_inlay arranges the figures on their real cavities,
+        # builds the box around them and checks every wall. The unrotated
+        # figures only fix the layout order, so neighbours do not swap places
+        # while one of them is being rotated.
         progress.progress(0.70, text=t("app.progress.step3"))
         t_step = logger.log(t("app.log.build"), t_step)
         inlay, actual_w, actual_d, actual_h = inlayer.build_inlay(
-            fig_offsets, config, individual_offsets=individual_offsets,
+            dilated, config, individual_offsets=individual_offsets,
             individual_recess_positions=individual_recess_positions,
-            stable_global_bounds=stable_global_bounds,
             file_names=file_names,
+            sorting_reference=unrotated_fig_meshes,
         )
 
-        # Berechne die Nullpunkt-Verschiebung fuer die 3D-Vorschau
-        bmin, bmax = stable_global_bounds
-        shift_x = (bmin[0] + bmax[0]) / 2 - actual_w / 2
-        shift_y = (bmin[1] + bmax[1]) / 2 - actual_d / 2
-
-        # Schritt 4: Wandstärkenprüfung
+        # Step 4: wall check (ran inside build_inlay, reported here)
         progress.progress(0.90, text=t("app.progress.step4"))
         t_step = logger.log(t("app.log.wall_check"), t_step)
-        stats_3d = inlayer.wall_thickness_stats_3d(inlay, config)
+        stats_3d = inlayer.wall_thickness_stats_3d(inlay)
 
         progress.progress(1.0, text=t("app.progress.done"))
         logger.log(t("app.progress.done"), t_start)
@@ -927,7 +896,6 @@ if run_btn:
             "actual_h": actual_h,
             "stl_bytes": stl_data,
             "wall_thickness": wall_thickness,
-            "depth_fraction": depth_fraction,
             "inlay": inlay,
             "fig_meshes": fig_meshes,
             # Everything that determines a prepared, rotated figure. The inlay's
@@ -938,13 +906,8 @@ if run_btn:
                 + ":".join(str(r) for r in individual_rotations[i])
                 for i in range(n_files)
             ],
-            "fig_offsets": fig_offsets,
             "file_names": file_names,
             "is_multi": is_multi,
-            "xy_translations": xy_translations,
-            "z_offsets": z_offsets,
-            "shift_x": float(shift_x),
-            "shift_y": float(shift_y),
         }
 
     except Exception as e:
@@ -970,14 +933,8 @@ if "result" in st.session_state:
     _wt = res["wall_thickness"]
     inlay = res["inlay"]
     fig_meshes = res["fig_meshes"]
-    fig_offsets = res["fig_offsets"]
     _file_names = res["file_names"]
     _is_multi = res["is_multi"]
-    _df = res["depth_fraction"]
-    xy_trans = res.get("xy_translations", [np.array([0.0, 0.0])] * len(fig_meshes))
-    z_offs = res.get("z_offsets", [0.0] * len(fig_meshes))
-    _sx = res.get("shift_x", 0.0)
-    _sy = res.get("shift_y", 0.0)
     _token = res.get("result_token", "")
 
     with col_left:
@@ -994,20 +951,10 @@ if "result" in st.session_state:
                 f'<div class="warning-badge">{t("app.results.wall_thin")}</div>',
                 unsafe_allow_html=True,
             )
-            # Ermittle betroffene Dateinamen aus den Metadaten des Inlays
-            violating_names = []
-            violating_indices = inlay.metadata.get("violating_indices", []) if hasattr(inlay, "metadata") else []
-            for idx in violating_indices:
-                if idx < len(_file_names):
-                    violating_names.append(_file_names[idx])
-            
-            affected_text = ""
-            if violating_names:
-                affected_text = t("app.results.affected", names=", ".join(violating_names))
-            
-            st.warning(t("app.results.wall_warning", wall=_wt,
-                          measured=f"{stats_3d['min_wall_mm']:.2f}",
-                          affected=affected_text))
+            findings = "\n".join(
+                "- " + inlayer.describe_violation(v, _file_names) for v in stats_3d["violations"]
+            )
+            st.warning(t("app.results.wall_warning", wall=_wt, findings=findings))
         st.write("")
 
         m_col1, m_col2 = st.columns(2)
@@ -1080,20 +1027,13 @@ if "result" in st.session_state:
         # Figuren-Traces: jede Figur in eigener Farbe
         max_fig_faces = 15000 if not _is_multi else 10000
 
-        # Exakt die Z-Ausdehnung, mit der build_inlay die Figuren platziert hat.
-        # Nicht nachrechnen: die Bounds enthalten einen Inflations-Ausgleich,
-        # ohne den die Vorschau die Figuren zu tief in der Box zeichnet.
-        max_z_extent = float(inlay.metadata["max_z_extent"])
-
-        for i, (fig_m, fig_ot) in enumerate(zip(fig_meshes, fig_offsets)):
-            # Dezimierung (gecacht) vor der Translation – beides ist reihenfolgeunabhaengig
+        # Exactly the translation build_inlay applied to each figure. The
+        # prepared figure shares its frame with the dilated one it was given,
+        # so the same translation puts it inside its cavity.
+        placements = inlay.metadata["placements"]
+        for i, fig_m in enumerate(fig_meshes):
             viz_fig = _decimated_for_viz(fig_m, res["fig_cache_keys"][i], max_fig_faces).copy()
-            bmin_ot_z = float(fig_ot.bounds[0][2])
-            trans_x = xy_trans[i][0] - _sx
-            trans_y = xy_trans[i][1] - _sy
-            fig_h = float(fig_ot.bounds[1][2] - fig_ot.bounds[0][2])
-            z_pos_bottom = actual_h + (1 - _df) * max_z_extent - fig_h
-            viz_fig.apply_translation([trans_x, trans_y, z_pos_bottom - bmin_ot_z + z_offs[i]])
+            viz_fig.apply_translation(placements[i])
 
             color = _fig_colors[i % len(_fig_colors)]
             label = (_file_names[i] if i < len(_file_names)

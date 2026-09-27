@@ -474,13 +474,9 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Schritt 2/4: Toleranz-Offset...",
         "en": "Step 2/4: tolerance offset...",
     },
-    "app.progress.step2b": {
-        "de": "Schritt 2b/4: {n} Figuren anordnen...",
-        "en": "Step 2b/4: arranging {n} figures...",
-    },
     "app.progress.step3": {
-        "de": "Schritt 3/4: Inlay konstruieren...",
-        "en": "Step 3/4: constructing inlay...",
+        "de": "Schritt 3/4: Figuren anordnen, Inlay konstruieren...",
+        "en": "Step 3/4: arranging figures, constructing inlay...",
     },
     "app.progress.step4": {
         "de": "Schritt 4/4: Wandstärkenprüfung...",
@@ -506,13 +502,9 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Berechne Toleranz-Offset (Voxel-Dilation)...",
         "en": "Computing tolerance offset (voxel dilation)...",
     },
-    "app.log.arrange": {
-        "de": "Ordne {n} Figuren stabil an (gap={gap} mm, style={style})...",
-        "en": "Arranging {n} figures on a stable grid (gap={gap} mm, style={style})...",
-    },
     "app.log.build": {
-        "de": "Konstruiere Inlay (CSG Boolean)...",
-        "en": "Constructing inlay (CSG boolean)...",
+        "de": "Ordne Figuren an und konstruiere das Inlay (CSG Boolean)...",
+        "en": "Arranging figures and constructing the inlay (CSG boolean)...",
     },
     "app.log.wall_check": {
         "de": "Führe 3D-Wandstärkenprüfung durch...",
@@ -532,16 +524,12 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "🟢 Wall thickness OK",
     },
     "app.results.wall_thin": {
-        "de": "⚠️ Wandstärke zu dünn",
-        "en": "⚠️ Wall too thin",
+        "de": "⚠️ Prüfung nicht bestanden",
+        "en": "⚠️ Check failed",
     },
     "app.results.wall_warning": {
-        "de": "Mindestwandstärke von {wall} mm wird an Stellen unterschritten (gemessen: {measured} mm)!{affected}",
-        "en": "The minimum wall thickness of {wall} mm is not met in places (measured: {measured} mm)!{affected}",
-    },
-    "app.results.affected": {
-        "de": "\n\nBetroffene Figur(en): **{names}**",
-        "en": "\n\nAffected figure(s): **{names}**",
+        "de": "Das Inlay erfüllt die Vorgaben nicht (Mindestwandstärke {wall} mm):\n\n{findings}",
+        "en": "The inlay does not meet the targets (minimum wall thickness {wall} mm):\n\n{findings}",
     },
     "app.metric.min_wall": {
         "de": "Min Wandstärke",
@@ -738,12 +726,12 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "  Result: {faces} triangles",
     },
     "pipeline.wall_verify": {
-        "de": "Berechne 3D-Wandstärken-Verifikation (Distanz zu den Box-Wänden) ...",
-        "en": "Computing 3D wall thickness verification (distance to the box walls) ...",
+        "de": "Wandstärken-Prüfung (gemessen an den Aussparungen) ...",
+        "en": "Wall check (measured on the cavities) ...",
     },
     "pipeline.min_wall": {
-        "de": "  Mindest-Wandstärke (Box-Wände): {measured} mm  (Ziel >= {target} mm)",
-        "en": "  Minimum wall thickness (box walls): {measured} mm  (target >= {target} mm)",
+        "de": "  Dünnste Seiten-/Bodenwand: {measured} mm  (Ziel >= {target} mm)",
+        "en": "  Thinnest side/floor wall: {measured} mm  (target >= {target} mm)",
     },
     "config.bad_finger_axis": {
         "de": "finger_recess_axis muss 'x' oder 'y' sein (ist '{value}')",
@@ -772,6 +760,34 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "error.csg_empty": {
         "de": "CSG-Differenz ergab leeres Mesh. Prüfe Box-Dimensionen und ob sich die Geometrien überlappen.",
         "en": "CSG difference produced an empty mesh. Check the box dimensions and whether the geometries overlap.",
+    },
+    "error.no_wall_check": {
+        "de": "Dieses Mesh trägt keine Wandstärken-Prüfung – sie entsteht in build_inlay.",
+        "en": "This mesh carries no wall check – build_inlay creates it.",
+    },
+    "check.side": {
+        "de": "{name}: Seitenwand {measured} mm (Ziel {target} mm)",
+        "en": "{name}: side wall {measured} mm (target {target} mm)",
+    },
+    "check.floor": {
+        "de": "{name}: Boden {measured} mm (Ziel {target} mm)",
+        "en": "{name}: floor {measured} mm (target {target} mm)",
+    },
+    "check.inner": {
+        "de": "{name}: Wand zu {other} nur {measured} mm (Ziel {target} mm)",
+        "en": "{name}: wall to {other} only {measured} mm (target {target} mm)",
+    },
+    "check.merged": {
+        "de": "{name}: Aussparung verschmilzt mit {other} (Ziel {target} mm Abstand)",
+        "en": "{name}: cavity merges with {other} (target {target} mm apart)",
+    },
+    "check.sealed": {
+        "de": "{name}: Aussparung ist nach oben geschlossen – ein Hohlraum im Druck",
+        "en": "{name}: cavity is closed at the top – a sealed void in the print",
+    },
+    "check.no_cavity": {
+        "de": "{name}: keine Aussparung – die Figur liegt außerhalb der Box",
+        "en": "{name}: no cavity – the figure lies outside the box",
     },
     "error.input_not_found": {
         "de": "Eingabedatei nicht gefunden: {path}",
@@ -914,13 +930,9 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "[2/4] Toleranz-Offset berechnen",
         "en": "[2/4] Computing tolerance offset",
     },
-    "cli.step2b": {
-        "de": "[2b/4] {n} Figuren anordnen (gap={gap} mm, style={style})",
-        "en": "[2b/4] Arranging {n} figures (gap={gap} mm, style={style})",
-    },
     "cli.step3": {
-        "de": "[3/4] Inlay konstruieren",
-        "en": "[3/4] Constructing inlay",
+        "de": "[3/4] Figuren anordnen und Inlay konstruieren",
+        "en": "[3/4] Arranging figures and constructing the inlay",
     },
     "cli.saved": {
         "de": "  => {path} gespeichert",
@@ -937,6 +949,14 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "cli.success": {
         "de": "Erfolg: Mindestwandstärke von {wall} mm wird überall eingehalten!",
         "en": "Success: the minimum wall thickness of {wall} mm is met everywhere!",
+    },
+    "cli.check_failed": {
+        "de": "Prüfung nicht bestanden – {path} wurde trotzdem geschrieben, damit du es ansehen kannst (Exit-Code {code}).",
+        "en": "Check failed – {path} was written anyway so you can inspect it (exit code {code}).",
+    },
+    "cli.recess_position_ignored": {
+        "de": "Hinweis: --finger-recess-position wird ohne --finger-recesses ignoriert.",
+        "en": "Note: --finger-recess-position is ignored without --finger-recesses.",
     },
     "cli.total_time": {
         "de": "Gesamtlaufzeit: {seconds}s",

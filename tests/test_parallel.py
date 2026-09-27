@@ -131,9 +131,7 @@ class TestBuildInlayParallel:
     def test_parallel_liefert_gleiches_ergebnis(
         self, dilated_cube, dilated_sphere, fast_test_config, capsys
     ):
-        arranged = inlayer.arrange_figures(
-            [dilated_cube, dilated_sphere], gap=fast_test_config.wall_thickness
-        )
+        arranged = [dilated_cube, dilated_sphere]
         cfg_par = dataclasses.replace(fast_test_config, enable_parallel=True)
 
         inlay_seq, w1, d1, h1 = inlayer.build_inlay(arranged, fast_test_config)
