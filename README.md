@@ -355,7 +355,10 @@ report = inlayer.wall_thickness_stats_3d(inlay)   # also in inlay.metadata["wall
 ## 📐 Parameters
 
 All parameters flow through the frozen `Config` dataclass (CLI flags / web-app
-sidebar).
+sidebar). Values are validated up front: lengths must be > 0 (`clearance` and
+`finger_recess_z_offset` ≥ 0), `depth_fraction` in (0, 1], `decimate_faces`
+≥ 4, and NaN or infinity is rejected everywhere. The CLI reports an invalid
+value as a usage error before any work starts.
 
 ### Print settings
 
@@ -480,6 +483,7 @@ sidebar).
 
 ## ⚠️ Technical notes
 
+- **Even clearance on slopes:** the tolerance offset grows the figure by the same amount in every direction (within about 5 %). The plain voxel dilation used before grew an octahedron — with 2 mm of clearance a figure got only about 1.5 mm on 45° slopes and could jam there.
 - **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `VOXEL_PITCH` raises memory use by roughly 8×.
 - **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore calls `apply_transform(vox.transform)` manually after every `marching_cubes` call.
 - **CSG engine:** boolean operations run in `manifold3d` (directly, never trimesh's default engine). manifold3d already parallelises internally across cores.

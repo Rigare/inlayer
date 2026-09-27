@@ -320,6 +320,21 @@ class TestCLI:
         assert "clearance" in result.stderr
         assert "Traceback" not in result.stderr
 
+    @pytest.mark.parametrize(
+        "flag,value,message",
+        [("-df", "1.5", "depth_fraction must be > 0 and <= 1"),
+         ("-w", "nan", "wall_thickness must be a finite number")],
+    )
+    def test_cli_out_of_range_value_is_a_usage_error(self, cube_stl_path, tmp_path, flag, value, message):
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "inlayer.py"), "-i", cube_stl_path,
+             "-o", str(tmp_path / "inlay.stl"), flag, value],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 2
+        assert message in result.stderr
+        assert "Traceback" not in result.stderr
+
 
 @pytest.mark.slow
 class TestMultiFigurePipeline:

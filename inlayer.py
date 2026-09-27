@@ -30,7 +30,7 @@ import i18n
 # Uebersetzungsfunktion laeuft deshalb unter dem Alias `t_`.
 from i18n import t as t_
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Callable, Final, Any, Iterable, TypeVar, cast
 from manifold3d import Manifold, Mesh, OpType
 from scipy.ndimage import (
@@ -49,9 +49,30 @@ except Exception:
     pass
 
 
+def _positive(value: float) -> bool:
+    return value > 0
+
+
+def _non_negative(value: float) -> bool:
+    return value >= 0
+
+
+# Which fields must be > 0 and which >= 0 (None - "automatic" - is always
+# fine). A table so that a new field cannot silently skip its check, and so
+# each rule has exactly one message: "-c -0.5" used to say "must be > 0"
+# although 0 is allowed.
+_RANGE_RULES: Final = (
+    (_positive, ("wall_thickness", "voxel_pitch", "stl_unit_to_mm", "finger_radius",
+                 "box_width", "box_depth", "box_height", "box_diameter", "figure_gap")),
+    (_non_negative, ("clearance", "finger_recess_z_offset")),
+)
+_RANGE_MESSAGES: Final = {_positive: "config.must_be_positive",
+                          _non_negative: "config.must_be_non_negative"}
+
+
 @dataclass(frozen=True)
 class Config:
-    """Laufzeit-Konfiguration für die Inlayer-Pipeline."""
+    """Runtime configuration of the Inlayer pipeline."""
 
     clearance: float = 0.4
     wall_thickness: float = 2.0
@@ -83,56 +104,33 @@ class Config:
     enable_parallel: bool = False
 
     def __post_init__(self) -> None:
-        """Validiert Parameter-Bereiche, damit Fehler früh sichtbar werden."""
-        if self.finger_radius <= 0:
-            raise ValueError(t_("config.must_be_positive", name="finger_radius", value=self.finger_radius))
-        if self.finger_recess_axis not in ("x", "y"):
-            raise ValueError(
-                t_("config.bad_finger_axis", value=self.finger_recess_axis)
-            )
-        if self.finger_recess_z_offset < 0:
-            raise ValueError(
-                t_("config.must_be_positive", name="finger_recess_z_offset", value=self.finger_recess_z_offset)
-            )
-        if not -1.0 <= self.finger_recess_position <= 1.0:
-            raise ValueError(
-                t_("config.bad_finger_position", value=self.finger_recess_position)
-            )
-        if self.clearance < 0:
-            raise ValueError(t_("config.must_be_positive", name="clearance", value=self.clearance))
-        if self.wall_thickness <= 0:
-            raise ValueError(t_("config.must_be_positive", name="wall_thickness", value=self.wall_thickness))
+        """Validates every value range, so mistakes surface here and not as an
+        unrelated error deep inside the pipeline."""
+        # NaN and inf pass every `<` comparison below: -w nan ended in "CSG
+        # difference failed", -c nan in "cannot convert float NaN to integer".
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(t_("config.must_be_finite", name=field.name, value=value))
+        for rule, names in _RANGE_RULES:
+            for name in names:
+                value = getattr(self, name)
+                if value is not None and not rule(value):
+                    raise ValueError(t_(_RANGE_MESSAGES[rule], name=name, value=value))
         if not 0.0 < self.depth_fraction <= 1.0:
-            raise ValueError(
-                t_("config.must_be_positive", name="depth_fraction", value=self.depth_fraction)
-            )
-        if self.voxel_pitch <= 0:
-            raise ValueError(t_("config.must_be_positive", name="voxel_pitch", value=self.voxel_pitch))
+            raise ValueError(t_("config.must_be_fraction", name="depth_fraction",
+                                value=self.depth_fraction))
         if self.decimate_faces < 4:
-            raise ValueError(
-                t_("config.must_be_positive", name="decimate_faces", value=self.decimate_faces)
-            )
-        if self.stl_unit_to_mm <= 0:
-            raise ValueError(
-                t_("config.must_be_positive", name="stl_unit_to_mm", value=self.stl_unit_to_mm)
-            )
-        for name, val in (
-            ("box_width", self.box_width),
-            ("box_depth", self.box_depth),
-            ("box_height", self.box_height),
-            ("box_diameter", self.box_diameter),
-            ("figure_gap", self.figure_gap),
-        ):
-            if val is not None and val <= 0:
-                raise ValueError(t_("config.must_be_positive", name=name, value=val))
+            raise ValueError(t_("config.must_be_at_least", name="decimate_faces",
+                                value=self.decimate_faces, minimum=4))
+        if not -1.0 <= self.finger_recess_position <= 1.0:
+            raise ValueError(t_("config.bad_finger_position", value=self.finger_recess_position))
+        if self.finger_recess_axis not in ("x", "y"):
+            raise ValueError(t_("config.bad_finger_axis", value=self.finger_recess_axis))
         if self.box_shape not in ("box", "cylinder"):
-            raise ValueError(
-                t_("config.bad_box_shape", value=self.box_shape)
-            )
+            raise ValueError(t_("config.bad_box_shape", value=self.box_shape))
         if self.layout_style not in ("compact", "horizontal", "vertical"):
-            raise ValueError(
-                t_("config.bad_layout_style", value=self.layout_style)
-            )
+            raise ValueError(t_("config.bad_layout_style", value=self.layout_style))
 
     @property
     def effective_figure_gap(self) -> float:
@@ -496,17 +494,29 @@ def _dilation_iterations(distance: float, config: Config) -> int:
     return max(0, math.floor((distance - inflation) / pitch + 0.5 + 1e-9))
 
 
+# Share of dilation steps done with the full 3x3x3 cube instead of the
+# 6-neighbourhood cross. k steps of a cross and m of a cube grow a surface with
+# normal u by (k - m) * max|u_i| + m * sum|u_i| voxels (the support functions of
+# octahedron and cube). Along an axis that is k either way; along the space
+# diagonal it is k exactly for m / k = (sqrt(3) - 1) / 2. Every other direction
+# then lies within 0.97 ... 1.06 of the axis growth - with the cross alone the
+# diagonal got 0.58 of it, alternating 1:1 overshoots by 15 %.
+_CUBE_STEP_SHARE: Final[float] = (math.sqrt(3.0) - 1.0) / 2.0
+_CUBE: Final = np.ones((3, 3, 3), dtype=bool)
+
+
 def dilate(
     mesh: trimesh.Trimesh, distance: float, config: Config = _DEFAULT_CFG
 ) -> trimesh.Trimesh:
-    """Toleranz-Offset via Voxel-Dilation (robuster als Normalen-Shift).
+    """Tolerance offset via voxel dilation (more robust than a normal shift).
 
-    Kompensiert die systematische Inflation der Voxel-Pipeline: die
-    Marching-Cubes-Rekonstruktion in prepare_figure traegt ~voxel_pitch/2 pro
-    Seite auf, die hiesige ~pitch/2. Gemessen (Wuerfel und Kugel identisch) lag
-    das effektive Spiel ohne Kompensation um 0.75 * voxel_pitch ueber der
-    konfigurierten clearance. Kehrseite: das effektive Spiel kann nicht unter
-    ~0.75 * voxel_pitch fallen (iters >= 0).
+    Compensates the systematic inflation of the voxel pipeline: the
+    marching-cubes reconstruction in prepare_figure adds ~voxel_pitch/2 per
+    side, the one here ~pitch/2. Measured (cube and sphere alike), the
+    effective clearance without compensation was 0.75 * voxel_pitch above the
+    configured one. Flip side: it cannot drop below ~0.75 * voxel_pitch
+    (iters >= 0). The dilation is close to isotropic, so slopes and curves get
+    the same clearance as axis-parallel faces (see _CUBE_STEP_SHARE).
     """
     pitch = config.voxel_pitch / 2
     t = _log(t_("pipeline.voxelize_dilation", pitch=pitch))
@@ -517,21 +527,27 @@ def dilate(
     iters = _dilation_iterations(distance, config)
 
     if iters > 0:
-        # Einmaliges Padding um 'iters' auf allen Seiten
+        # Pad by 'iters' on every side: both structuring elements grow at most
+        # one voxel per axis and step, so nothing is clipped at the border.
         dilated = np.pad(vox.matrix, iters, constant_values=False)
-
-        # Vektorisiert: scipy-ndimage mit iterations-Parameter statt Python-Schleife.
-        # Mathematisch äquivalent zur vorherigen Schleife (close+dilate pro Iteration),
-        # aber ~10–50× schneller (C-Loop).
-        dilated = binary_closing(dilated, iterations=iters)
-        dilated = binary_dilation(dilated, iterations=iters)
+        # scipy's default element (6-neighbourhood) grows an octahedron: 2 mm
+        # of clearance along the axes left 1.5 mm on a 45° slope. Some steps
+        # with the full 3x3x3 cube balance that - see _CUBE_STEP_SHARE. The
+        # growth along the axes, which _dilation_iterations is calibrated on,
+        # is one voxel per step either way. (No closing before the dilation:
+        # dilating a closing with the same element equals dilating the input -
+        # checked bit for bit on 200 random grids - and cost 2/3 of the time.)
+        cube_steps = round(iters * _CUBE_STEP_SHARE)
+        dilated = binary_dilation(dilated, iterations=iters - cube_steps)
+        if cube_steps:
+            dilated = binary_dilation(dilated, structure=_CUBE, iterations=cube_steps)
     else:
-        # Gewuenschtes Spiel <= systematische Inflation: keine Dilation.
-        # (scipy interpretiert iterations=0 als "bis Konvergenz", daher der Guard.)
+        # Requested clearance <= systematic inflation: no dilation.
+        # (scipy treats iterations=0 as "until convergence", hence the guard.)
         dilated = vox.matrix
 
     t = _log(t_("pipeline.marching_cubes"))
-    # iters=0 laesst den Transform unveraendert, daher ein Aufruf fuer beide Faelle.
+    # iters=0 leaves the transform unchanged, so one call serves both cases.
     result = _grid_to_mesh(dilated, _padded_transform(vox.transform, iters))
     _log(
         t_("pipeline.result", faces=f"{len(result.faces):,}", extents=result.extents.round(2)), t

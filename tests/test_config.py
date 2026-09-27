@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import fields
+
 import pytest
 
 from inlayer import Config
@@ -132,3 +135,45 @@ class TestConfigValidation:
         assert c.box_width == 50.0
         assert c.box_depth == 40.0
         assert c.box_height == 20.0
+
+
+FLOAT_FIELDS = [f.name for f in fields(Config) if f.type in (float, float | None)]
+
+
+class TestConfigNonFinite:
+    """NaN and inf passed every `x < 0` check and failed later with unrelated
+    errors ("CSG difference failed", "cannot convert float NaN to integer")."""
+
+    def test_every_float_field_is_covered(self):
+        assert {"clearance", "wall_thickness", "box_diameter", "offset_z"} <= set(FLOAT_FIELDS)
+
+    @pytest.mark.parametrize("name", FLOAT_FIELDS)
+    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+    def test_rejected_with_the_field_name(self, name, value):
+        with pytest.raises(ValueError, match=f"{name} must be a finite number"):
+            Config(**{name: value})
+
+
+class TestConfigMessages:
+    """Each range has its own message; they used to share "must be > 0"."""
+
+    def test_zero_allowed_fields_say_so(self):
+        with pytest.raises(ValueError, match=r"clearance must be >= 0"):
+            Config(clearance=-0.5)
+        with pytest.raises(ValueError, match=r"finger_recess_z_offset must be >= 0"):
+            Config(finger_recess_z_offset=-1.0)
+
+    def test_depth_fraction_names_both_bounds(self):
+        with pytest.raises(ValueError, match=r"depth_fraction must be > 0 and <= 1 \(is 1.5\)"):
+            Config(depth_fraction=1.5)
+
+    def test_decimate_faces_names_its_minimum(self):
+        with pytest.raises(ValueError, match=r"decimate_faces must be >= 4 \(is 3\)"):
+            Config(decimate_faces=3)
+
+    def test_zero_is_allowed_where_the_message_says_so(self):
+        Config(clearance=0.0, finger_recess_z_offset=0.0)
+
+    def test_effective_figure_gap(self):
+        assert Config(wall_thickness=3.0).effective_figure_gap == 3.0
+        assert Config(wall_thickness=3.0, figure_gap=1.5).effective_figure_gap == 1.5

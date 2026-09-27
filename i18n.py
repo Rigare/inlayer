@@ -975,6 +975,22 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "{name} muss > 0 sein (ist {value})",
         "en": "{name} must be > 0 (is {value})",
     },
+    "config.must_be_non_negative": {
+        "de": "{name} muss >= 0 sein (ist {value})",
+        "en": "{name} must be >= 0 (is {value})",
+    },
+    "config.must_be_finite": {
+        "de": "{name} muss eine endliche Zahl sein (ist {value})",
+        "en": "{name} must be a finite number (is {value})",
+    },
+    "config.must_be_fraction": {
+        "de": "{name} muss > 0 und <= 1 sein (ist {value})",
+        "en": "{name} must be > 0 and <= 1 (is {value})",
+    },
+    "config.must_be_at_least": {
+        "de": "{name} muss >= {minimum} sein (ist {value})",
+        "en": "{name} must be >= {minimum} (is {value})",
+    },
     "config.bad_box_shape": {
         "de": "box_shape muss 'box' oder 'cylinder' sein (ist '{value}')",
         "en": "box_shape must be 'box' or 'cylinder' (is '{value}')",
