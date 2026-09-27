@@ -16,40 +16,83 @@ import trimesh
 import app_helpers
 
 
-class TestRecessPositionTargets:
-    """Figure selection of the per-figure finger recess position control."""
+class TestResolveSelection:
+    """One rule for all three per-figure controls (recess, offsets, rotation)."""
 
     ALL = "Alle Figuren"  # the app's untranslated sentinel
 
     def test_all_figures_reads_first_writes_every(self):
-        names = ["a.stl", "b.stl", "c.stl"]
-        ref, targets = app_helpers.recess_position_targets(self.ALL, names, self.ALL)
-        assert ref == "a.stl"
-        assert targets == names
+        ids = ["a", "b", "c"]
+        assert app_helpers.resolve_selection(self.ALL, ids, self.ALL) == (self.ALL, "a", ids)
 
     def test_single_selection_reads_and_writes_that_figure(self):
-        names = ["a.stl", "b.stl"]
-        ref, targets = app_helpers.recess_position_targets("b.stl", names, self.ALL)
-        assert ref == "b.stl"
-        assert targets == ["b.stl"]
+        assert app_helpers.resolve_selection("b", ["a", "b"], self.ALL) == ("b", "b", ["b"])
 
-    def test_stale_selection_falls_back_to_the_first_figure(self):
-        """A figure removed from the upload must not raise on the next rerun."""
-        names = ["a.stl"]
-        ref, targets = app_helpers.recess_position_targets("gone.stl", names, self.ALL)
-        assert ref == "a.stl"
-        assert targets == ["a.stl"]
+    def test_removed_figure_falls_back_to_all(self):
+        """The selection itself is repaired, so the selectbox never sees a
+        value that is no longer among its options."""
+        assert app_helpers.resolve_selection("gone", ["a", "b"], self.ALL) == (self.ALL, "a", ["a", "b"])
+
+    def test_first_figure_under_all_follows_the_upload(self):
+        """Under "all figures" the reference is whatever figure is first now."""
+        assert app_helpers.resolve_selection(self.ALL, ["b"], self.ALL)[1] == "b"
 
     def test_returned_target_list_is_a_copy(self):
-        """The caller writes through the list; it must not alias fig_names."""
-        names = ["a.stl", "b.stl"]
-        _, targets = app_helpers.recess_position_targets(self.ALL, names, self.ALL)
-        targets.append("c.stl")
-        assert names == ["a.stl", "b.stl"]
+        """The caller writes through the list; it must not alias fig_ids."""
+        ids = ["a", "b"]
+        app_helpers.resolve_selection(self.ALL, ids, self.ALL)[2].append("c")
+        assert ids == ["a", "b"]
 
     def test_empty_figure_list_raises(self):
         with pytest.raises(ValueError):
-            app_helpers.recess_position_targets(self.ALL, [], self.ALL)
+            app_helpers.resolve_selection(self.ALL, [], self.ALL)
+
+
+class TestFigureLabels:
+    def test_repeated_names_get_a_counter(self):
+        assert app_helpers.figure_labels(["model.stl", "a.stl", "model.stl"]) == [
+            "model.stl", "a.stl", "model.stl (2)"
+        ]
+
+    def test_empty(self):
+        assert app_helpers.figure_labels([]) == []
+
+
+class TestAppliedFigureParams:
+    STORED = {
+        "a": {**app_helpers.FIGURE_DEFAULTS, "offset_x": 5.0, "rot_z": 90.0, "finger_recess_position": 0.5},
+        "b": dict(app_helpers.FIGURE_DEFAULTS),
+    }
+
+    def test_values_per_figure_in_upload_order(self):
+        applied = app_helpers.applied_figure_params(self.STORED, ["b", "a"], True, True, True)
+        assert applied[1] == {"offset": (5.0, 0.0, 0.0), "rotation": (0.0, 0.0, 90.0),
+                              "recess_position": 0.5}
+        assert applied[0]["offset"] == (0.0, 0.0, 0.0)
+
+    def test_disabled_features_count_as_zero(self):
+        (a,) = app_helpers.applied_figure_params(self.STORED, ["a"], False, False, False)
+        assert a == {"offset": (0.0, 0.0, 0.0), "rotation": (0.0, 0.0, 0.0), "recess_position": 0.0}
+
+    def test_unknown_figure_gets_the_defaults(self):
+        (x,) = app_helpers.applied_figure_params({}, ["new"], True, True, True)
+        assert x["offset"] == (0.0, 0.0, 0.0) and x["recess_position"] == 0.0
+
+
+class TestPreviewCopy:
+    def test_never_the_input_and_no_metadata(self):
+        """Below the face budget decimate_mesh returns its input - the cache
+        then held the whole inlay, metadata and all."""
+        box = trimesh.creation.box(extents=[1, 1, 1])
+        box.metadata["wall_check"] = {"big": "payload"}
+        out = app_helpers.preview_copy(box, 10000)
+        assert out is not box
+        assert out.metadata == {}
+        assert len(out.faces) == len(box.faces)
+
+    def test_decimates_above_the_budget(self):
+        sphere = trimesh.creation.icosphere(subdivisions=4)
+        assert len(app_helpers.preview_copy(sphere, 500).faces) < len(sphere.faces)
 
 
 class TestFileHash:

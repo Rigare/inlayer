@@ -78,6 +78,12 @@ def get_language() -> str:
     return _current.get()
 
 
+def format_int(n: int) -> str:
+    """Integer with the current language's thousands separator (12,345 / 12.345)."""
+    text = f"{n:,}"
+    return text.replace(",", ".") if get_language() == "de" else text
+
+
 def t(key: str, /, **kwargs: object) -> str:
     """Uebersetzt `key` in die aktuelle Sprache und fuellt Platzhalter.
 

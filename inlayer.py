@@ -140,6 +140,9 @@ class Config:
 
 _DEFAULT_CFG: Final = Config()
 
+# Input read when the CLI gets no -i (and the web app no upload)
+DEFAULT_INPUT: Final[str] = "figure.stl"
+
 
 def _log(msg: str, t0: float | None = None) -> float:
     """Gibt eine Statuszeile mit optionaler Laufzeit seit t0 aus."""
@@ -201,14 +204,17 @@ def _effective_workers(n_items: int) -> int:
 
 
 def _parallel_map(
-    fn: Callable[[_T], _R], items: Iterable[_T], config: Config, what: str = ""
+    fn: Callable[[_T], _R], items: Iterable[_T], config: Config, what: str = "",
+    worker_init: Callable[[], None] | None = None,
 ) -> list[_R]:
-    """Wendet fn auf alle Items an – per ThreadPool, falls enable_parallel gesetzt.
+    """Applies fn to every item - in a thread pool if enable_parallel is set.
 
-    numpy/scipy/trimesh geben den GIL waehrend ihrer C-Aufrufe frei, daher
-    bringen Threads hier echten Multi-Core-Speedup ohne Pickling-Overhead.
-    Die Ergebnis-Reihenfolge entspricht der Item-Reihenfolge; Exceptions aus
-    den Workern werden unveraendert weitergereicht.
+    numpy/scipy/trimesh release the GIL during their C calls, so threads give
+    a real multi-core speedup without pickling. Results keep the item order;
+    exceptions from the workers propagate unchanged. `worker_init` runs in
+    each worker before fn (the web app attaches Streamlit's ScriptRunContext
+    there) - the one thread pool of both entry points, so neither can forget
+    the language hand-over below.
     """
     item_list = list(items)
     if not config.enable_parallel or len(item_list) < 2:
@@ -219,13 +225,15 @@ def _parallel_map(
            n=len(item_list), workers=workers)
     )
 
-    # ThreadPoolExecutor-Worker starten mit einem frischen Kontext und sehen die
-    # per ContextVar gesetzte Sprache nicht. Sie wird deshalb eingefangen und im
-    # Worker erneut gesetzt, sonst loggen die Threads in der Standardsprache.
+    # ThreadPoolExecutor workers start with a fresh context and do not see the
+    # language set through the ContextVar. It is captured here and set again
+    # inside each worker, otherwise the threads log in the default language.
     lang = i18n.get_language()
 
     def _with_lang(item: _T) -> _R:
         i18n.set_language(lang)
+        if worker_init is not None:
+            worker_init()
         return fn(item)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1070,7 +1078,7 @@ if __name__ == "__main__":
                 default=i18n.get_language(), env=i18n.ENV_VAR),
     )
     parser.add_argument(
-        "-i", "--input", nargs="+", default=["figur.stl"],
+        "-i", "--input", nargs="+", default=[DEFAULT_INPUT],
         help=t_("cli.input")
     )
     parser.add_argument(
