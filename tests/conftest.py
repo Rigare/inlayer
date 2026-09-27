@@ -19,13 +19,17 @@ import i18n  # noqa: E402  (erst nach der sys.path-Ergaenzung importierbar)
 
 
 @pytest.fixture(autouse=True)
-def _pin_language():
-    """Pinnt die Ausgabesprache fuer jeden Test auf Englisch.
+def _pin_language(monkeypatch):
+    """Pins the output language of every test to English.
 
-    Tests, die auf Log- oder Fehlertexte matchen, sollen nicht davon abhaengen,
-    welche Sprache gerade Standard ist oder ob INLAYER_LANG in der Umgebung
-    gesetzt ist. Die Standardsprache selbst wird in tests/test_i18n.py geprueft.
+    Tests that match log or error texts must not depend on the default
+    language or on INLAYER_LANG in the environment. Both are pinned: the
+    ContextVar for this process, the variable for the CLI subprocesses, which
+    inherit the environment - `INLAYER_LANG=de pytest` (as README and
+    compose.yaml suggest) used to fail the CLI tests. The default language
+    itself is tested in tests/test_i18n.py.
     """
+    monkeypatch.setenv(i18n.ENV_VAR, "en")
     i18n.set_language("en")
     yield
 

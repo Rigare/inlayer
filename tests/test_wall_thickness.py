@@ -1,228 +1,140 @@
-"""Tests fuer inlayer.wall_thickness_stats_3d."""
+"""Tests for the wall check that build_inlay runs and wall_thickness_stats_3d reports.
+
+The check measures the real cutters with manifold3d. Its predecessor
+rasterized the cavities: it overestimated walls by up to a pitch, never looked
+at the walls between cavities, passed an inlay without any cavity and blamed
+no figure for a recess breaking through.
+"""
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import trimesh
+from manifold3d import Manifold
 
+import i18n
 import inlayer
 from inlayer import Config
+from tests import geometry_probe as gp
+
+TOL = inlayer.WALL_TOLERANCE_MM
+CFG = Config(voxel_pitch=1.0, decimate_faces=1000, clearance=0.5)
 
 
-class TestWallThicknessSchema:
-    def test_returns_expected_keys(self, inlay_for_cube, fast_test_config):
-        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube, fast_test_config)
-        assert set(stats.keys()) == {
-            "min_wall_mm",
-            "passes_min_wall",
-            "target_mm",
-        }
+def _build(meshes, cfg=CFG, **kwargs):
+    inlay, w, d, h = inlayer.build_inlay(meshes, cfg, **kwargs)
+    return inlay, w, d, h
 
-    def test_values_have_correct_types(self, inlay_for_cube, fast_test_config):
-        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube, fast_test_config)
+
+def _kinds(inlay) -> list[tuple[str, int | None]]:
+    return [(v["kind"], v["figure"]) for v in inlay.metadata["wall_check"]["violations"]]
+
+
+class TestSchema:
+    def test_keys(self, inlay_for_cube):
+        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube)
+        assert set(stats) == {"min_wall_mm", "passes_min_wall", "target_mm", "violations"}
+
+    def test_types_and_default_result(self, inlay_for_cube, fast_test_config):
+        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube)
         assert isinstance(stats["min_wall_mm"], float)
-        assert isinstance(stats["passes_min_wall"], (bool, type(True)))
+        assert stats["passes_min_wall"] is True
+        assert stats["violations"] == []
         assert stats["target_mm"] == fast_test_config.wall_thickness
+        assert stats["min_wall_mm"] == pytest.approx(fast_test_config.wall_thickness, abs=TOL)
+
+    def test_needs_the_metadata_of_build_inlay(self):
+        """A plain mesh carries no check; guessing one from a voxel grid was
+        exactly the inaccurate path this replaces."""
+        with pytest.raises(ValueError, match="build_inlay"):
+            inlayer.wall_thickness_stats_3d(trimesh.creation.box(extents=[20, 20, 20]))
 
 
-class TestWallThicknessValues:
-    def test_min_wall_non_negative(self, inlay_for_cube, fast_test_config):
-        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube, fast_test_config)
-        assert stats["min_wall_mm"] >= 0.0
+class TestFindings:
+    """Every kind of finding, attributed to the figure it belongs to."""
 
-    def test_default_inlay_passes_min_wall(self, inlay_for_cube, fast_test_config):
-        # Der Standard-Workflow sollte die Wandstaerken-Anforderung erfuellen.
-        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube, fast_test_config)
-        assert stats["passes_min_wall"] is True
+    def test_side(self, dilated_cube):
+        inlay, w, d, h = _build([dilated_cube], individual_offsets=[(1.5, 0.0, 0.0)])
+        assert _kinds(inlay) == [("side", 0)]
+        measured = inlay.metadata["wall_check"]["violations"][0]["measured_mm"]
+        assert measured == pytest.approx(gp.outer_walls(inlay, w, d, h)["side"], abs=0.01)
 
-    def test_min_wall_close_to_target(self, inlay_for_cube, fast_test_config):
-        # Bei automatischer Box-Dimensionierung sollte die minimale Wand
-        # nahe der konfigurierten Soll-Wandstaerke liegen
-        # (kann durch Voxel-Diskretisierung leicht groesser sein).
-        stats = inlayer.wall_thickness_stats_3d(inlay_for_cube, fast_test_config)
-        # Untere Schranke: target - 0.1 (Toleranz im Quellcode)
-        assert stats["min_wall_mm"] >= fast_test_config.wall_thickness - 0.1
+    def test_floor(self, dilated_cube):
+        inlay, *_ = _build([dilated_cube], Config(voxel_pitch=1.0, decimate_faces=1000, box_height=8.5))
+        assert ("floor", 0) in _kinds(inlay)
 
+    def test_inner_names_both_figures(self, dilated_cube):
+        # figure_gap 4: moving the second figure 3 mm towards the first leaves ~1 mm
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, figure_gap=4.0, layout_style="horizontal")
+        inlay, w, d, h = _build([dilated_cube, dilated_cube.copy()], cfg,
+                                individual_offsets=[(0, 0, 0), (-3.0, 0, 0)])
+        (finding,) = inlay.metadata["wall_check"]["violations"]
+        assert (finding["kind"], {finding["figure"], finding["other"]}) == ("inner", {0, 1})
+        assert finding["measured_mm"] == pytest.approx(gp.inner_gap(inlay, w, d, h), abs=0.01)
+        assert finding["target_mm"] == 4.0
 
-class TestWallThicknessPassThreshold:
-    def test_threshold_uses_voxel_tolerance(self, dilated_cube):
-        # Konstruiere ein Inlay mit einer wall_thickness, die exakt erreicht wird,
-        # und pruefe, dass die 0.1 mm Voxel-Toleranz greift.
-        cfg = Config(wall_thickness=2.0, voxel_pitch=1.0, decimate_faces=1000)
-        inlay, *_ = inlayer.build_inlay(dilated_cube, cfg)
-        stats = inlayer.wall_thickness_stats_3d(inlay, cfg)
-        # passes_min_wall: True wenn min_wall >= target - 0.1
-        expected_pass = stats["min_wall_mm"] >= cfg.wall_thickness - 0.1
-        assert stats["passes_min_wall"] == expected_pass
+    def test_merged(self, dilated_cube):
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, figure_gap=2.0, layout_style="horizontal")
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
+                           individual_offsets=[(0, 0, 0), (-6.0, 0, 0)])
+        assert ("merged", 0) in _kinds(inlay)
 
-    def test_strict_higher_target_likely_fails(self, dilated_cube, fast_test_config):
-        # Wenn die Box-Dimensionen mit wall_thickness=2.0 berechnet wurden,
-        # aber wir die Stats mit wall_thickness=10.0 nachrechnen, sollte
-        # passes_min_wall=False sein.
-        inlay, *_ = inlayer.build_inlay(dilated_cube, fast_test_config)
-        strict_cfg = Config(
-            wall_thickness=10.0,
-            voxel_pitch=fast_test_config.voxel_pitch,
-            decimate_faces=fast_test_config.decimate_faces,
-        )
-        stats = inlayer.wall_thickness_stats_3d(inlay, strict_cfg)
-        assert stats["passes_min_wall"] is False
-        assert stats["target_mm"] == 10.0
+    def test_no_cavity(self, dilated_cube):
+        """Raised clear of the box: nothing is cut at all. The old check passed
+        such an inlay because an empty cavity grid had no thin wall."""
+        inlay, *_ = _build([dilated_cube], individual_offsets=[(0.0, 0.0, 30.0)])
+        assert _kinds(inlay) == [("no_cavity", 0)]
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is False
 
+    def test_sealed(self):
+        """build_inlay no longer produces one, so the check is fed by hand."""
+        box = Manifold.cube((20.0, 20.0, 10.0)).translate((-10.0, -10.0, -10.0))
+        cutter = Manifold.cube((6.0, 6.0, 4.0)).translate((-3.0, -3.0, -7.0))
+        check = inlayer._wall_check(box, [cutter], box - cutter, CFG)
+        assert [(v["kind"], v["figure"]) for v in check["violations"]] == [("sealed", 0)]
 
-class TestWallThicknessOffCenter:
-    def test_off_center_figure_reports_thin_wall(self, dilated_cube):
-        # Regressionstest: Die Messung nutzt die Voxelgitter-Kanten als Box-Waende.
-        # Das ist nur korrekt, weil trimesh die Voxelzentren exakt auf die
-        # Mesh-Bounds legt und die Inlay-Bounds immer den Box-Waenden entsprechen.
-        # Eine aussermittige Figur (duenne rechte Wand) muss korrekt gemessen werden.
-        cfg = Config(
-            wall_thickness=2.0, voxel_pitch=0.5, decimate_faces=1000, box_width=20.0
-        )
-        inlay, box_w, *_ = inlayer.build_inlay(
-            dilated_cube, cfg, individual_offsets=[(3.0, 0.0, 0.0)]
-        )
-        stats = inlayer.wall_thickness_stats_3d(inlay, cfg)
-        # Geometrische Erwartung fuer die rechte Wand:
-        # halbe Box-Breite minus halbe dilatierte Figurbreite minus X-Offset
-        expected = box_w / 2 - dilated_cube.extents[0] / 2 - 3.0
-        assert stats["min_wall_mm"] == pytest.approx(expected, abs=2 * cfg.voxel_pitch)
-        assert stats["passes_min_wall"] is False
+    def test_recess_breakthrough_names_its_figure(self, dilated_cube):
+        """Recesses are part of their figure's cutter; the old check only
+        reported a blanket "0.00 mm" and no figure."""
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, enable_finger_recesses=True,
+                     finger_radius=4.0, layout_style="horizontal")
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
+                           individual_offsets=[(0, 0, 0), (3.0, 0, 0)])
+        assert _kinds(inlay) == [("side", 1)]
+
+    def test_violating_indices_follow_the_findings(self, dilated_cube):
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()],
+                           Config(voxel_pitch=1.0, decimate_faces=1000, layout_style="horizontal"),
+                           individual_offsets=[(0, 0, 0), (0.0, 2.0, 0)])
+        assert inlay.metadata["violating_indices"] == [1]
 
 
-class TestWallThicknessCavityGrid:
-    def test_grid_contains_every_figure(self, dilated_cube, fast_test_config):
-        # Regressionstest: Das Hohlraum-Gitter wird figurweise gefuellt. Eine
-        # Begrenzung auf die Bounds einer Figur darf die bereits eingetragenen
-        # Figuren nicht wieder loeschen, sonst meldet ein Multi-Figur-Inlay nur
-        # noch den Hohlraum der zuletzt verarbeiteten Figur.
-        figs = [dilated_cube.copy(), dilated_cube.copy()]
-        placed = inlayer.arrange_figures(figs, 2.0)
-        inlay, *_ = inlayer.build_inlay(placed, fast_test_config)
+class TestCylinder:
+    def _cfg(self):
+        return Config(voxel_pitch=1.0, decimate_faces=1000, box_shape="cylinder")
 
-        grid = inlay.metadata["cavity_grid"]
-        # Die Figuren liegen entlang Y nebeneinander: beide Haelften des Gitters
-        # muessen Hohlraum enthalten.
-        haelfte = grid.shape[1] // 2
-        assert grid[:, :haelfte, :].any(), "Hohlraum der ersten Figur fehlt"
-        assert grid[:, haelfte:, :].any(), "Hohlraum der zweiten Figur fehlt"
+    def test_centred_figure_passes(self, dilated_cube):
+        inlay, *_ = _build([dilated_cube], self._cfg())
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is True
 
-    def test_multi_figure_wall_matches_single(self, dilated_cube, fast_test_config):
-        # Zwei gleiche Figuren nebeneinander: die Mindestwandstaerke muss
-        # dieselbe sein wie bei einer einzelnen Figur.
-        einzel, *_ = inlayer.build_inlay(dilated_cube, fast_test_config)
-        erwartet = inlayer.wall_thickness_stats_3d(einzel, fast_test_config)
-
-        placed = inlayer.arrange_figures(
-            [dilated_cube.copy(), dilated_cube.copy()], 2.0
-        )
-        multi, *_ = inlayer.build_inlay(placed, fast_test_config)
-        stats = inlayer.wall_thickness_stats_3d(multi, fast_test_config)
-
-        assert stats["min_wall_mm"] == pytest.approx(erwartet["min_wall_mm"])
-        assert stats["passes_min_wall"] is True
+    def test_radial_wall_is_measured(self, dilated_cube):
+        """An off-centre figure cuts into the mantle: the check reports the
+        real radial wall (the voxel check reported 0.50 for a breakthrough)."""
+        inlay, *_ = _build([dilated_cube], self._cfg(), individual_offsets=[(3.0, 0.0, 0.0)])
+        (finding,) = [v for v in inlay.metadata["wall_check"]["violations"] if v["kind"] == "side"]
+        assert finding["figure"] == 0
+        assert finding["measured_mm"] == pytest.approx(gp.cylinder_side_wall(inlay), abs=0.01)
 
 
-class TestWallThicknessSolidFallback:
-    def test_solid_inlay_uses_fallback(self, fast_test_config):
-        # Ein massiver Wuerfel hat keinen Hohlraum -> Fallback liefert target_wall.
-        solid = trimesh.creation.box(extents=[20.0, 20.0, 20.0])
-        stats = inlayer.wall_thickness_stats_3d(solid, fast_test_config)
-        # Im Fallback ist min == wall_thickness
-        assert stats["min_wall_mm"] == fast_test_config.wall_thickness
-        assert stats["passes_min_wall"] is True
+class TestDescribeViolation:
+    FINDING = {"figure": 1, "kind": "inner", "measured_mm": 0.8, "target_mm": 2.0, "other": 0}
 
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_names_both_figures_and_values(self, lang):
+        i18n.set_language(lang)
+        line = inlayer.describe_violation(self.FINDING, ["a.stl", "b.stl"])
+        assert "b.stl" in line and "a.stl" in line and "0.80" in line and "2.00" in line
 
-class TestWallThicknessCylinder:
-    def _cylinder_cfg(self, base: Config, **overrides) -> Config:
-        params = dict(
-            clearance=base.clearance,
-            wall_thickness=base.wall_thickness,
-            depth_fraction=base.depth_fraction,
-            voxel_pitch=base.voxel_pitch,
-            decimate_faces=base.decimate_faces,
-            box_shape="cylinder",
-        )
-        params.update(overrides)
-        return Config(**params)
-
-    def test_cylinder_inlay_passes_min_wall(self, dilated_cube, fast_test_config):
-        # Auto-dimensionierter Zylinder muss die Soll-Wandstaerke einhalten.
-        cfg = self._cylinder_cfg(fast_test_config)
-        inlay, *_ = inlayer.build_inlay(dilated_cube, cfg)
-        stats = inlayer.wall_thickness_stats_3d(inlay, cfg)
-        assert stats["passes_min_wall"] is True
-        assert stats["min_wall_mm"] >= cfg.wall_thickness - 0.1
-
-    def test_grid_corners_are_not_cavity(self, fast_test_config):
-        # Regressionstest: Die Gitterecken des Voxelgrids liegen ausserhalb des
-        # Zylinders und duerfen nicht als Kavitaet mit Wandstaerke ~0 zaehlen.
-        # Ein massiver Zylinder hat keinen Hohlraum -> Fallback liefert target_wall.
-        solid = trimesh.creation.cylinder(radius=10.0, height=8.0, sections=128)
-        cfg = self._cylinder_cfg(fast_test_config)
-        stats = inlayer.wall_thickness_stats_3d(solid, cfg)
-        assert stats["min_wall_mm"] == cfg.wall_thickness
-        assert stats["passes_min_wall"] is True
-
-    def test_off_center_figure_fails_radial_check(self, dilated_cube, fast_test_config):
-        # Eine radial verschobene Figur reisst die Zylinderwand an -> Messung
-        # muss die Unterschreitung erkennen.
-        cfg = self._cylinder_cfg(fast_test_config)
-        inlay, *_ = inlayer.build_inlay(
-            dilated_cube, cfg, individual_offsets=[(3.0, 0.0, 0.0)]
-        )
-        stats = inlayer.wall_thickness_stats_3d(inlay, cfg)
-        assert stats["passes_min_wall"] is False
-
-
-class TestFloorThicknessStableBounds:
-    """Regression: die Bodenwand darf nicht am Padding der stabilen Bounds haengen.
-
-    Die Bounds aus arrange_with_stable_bounds waren in Z um
-    clearance + voxel_pitch je Seite erweitert. Dieser Zuschlag floss ueber
-    max_z_extent voll in Box-Hoehe und Figuren-Position ein und machte den Boden
-    um bis zu 2 * (clearance + voxel_pitch) dicker als konfiguriert. Richtig ist
-    voxel_pitch/2 je Seite – die Inflation, die _solidify_figure auftraegt.
-    """
-
-    def _build_via_stable_bounds(self, mesh, cfg):
-        dilated = inlayer.dilate(mesh, cfg.clearance, cfg)
-        arranged, bounds, _ = inlayer.arrange_with_stable_bounds(
-            [mesh], [mesh], [dilated], cfg
-        )
-        inlay, _, _, box_h = inlayer.build_inlay(
-            arranged, cfg, stable_global_bounds=bounds
-        )
-        return inlay, box_h, dilated
-
-    def _floor_mm(self, inlay, cfg):
-        """Bodenwand aus dem Kavitaets-Gitter (auf voxel_pitch quantisiert)."""
-        grid = inlay.metadata["cavity_grid"]
-        occupied_z = np.where(grid.any(axis=(0, 1)))[0]
-        return float(occupied_z.min()) * cfg.voxel_pitch
-
-    def test_floor_stays_near_wall_thickness(self, cube_mesh, fast_test_config):
-        inlay, _, _ = self._build_via_stable_bounds(cube_mesh, fast_test_config)
-        floor = self._floor_mm(inlay, fast_test_config)
-        wt = fast_test_config.wall_thickness
-        # Untergrenze: die konfigurierte Wandstaerke (mit Voxel-Toleranz).
-        assert floor >= wt - 0.1
-        # Obergrenze: hoechstens ein Voxel Schlupf. Mit dem alten Padding lag
-        # der Boden hier bei 5.0 mm statt 2.0 mm.
-        assert floor <= wt + fast_test_config.voxel_pitch + 0.1
-
-    def test_box_height_uses_solidify_compensation_only(self, cube_mesh, fast_test_config):
-        cfg = fast_test_config
-        _, box_h, dilated = self._build_via_stable_bounds(cube_mesh, cfg)
-        expected_z = dilated.extents[2] + cfg.voxel_pitch
-        assert box_h == pytest.approx(
-            cfg.wall_thickness + cfg.depth_fraction * expected_z, abs=1e-6
-        )
-
-    def test_stable_and_plain_path_agree_on_height(self, cube_mesh, fast_test_config):
-        """Beide build_inlay-Pfade muessen dieselbe Box-Hoehe liefern."""
-        cfg = fast_test_config
-        _, box_h_stable, dilated = self._build_via_stable_bounds(cube_mesh, cfg)
-        _, _, _, box_h_plain = inlayer.build_inlay([dilated.copy()], cfg)
-        assert box_h_stable == pytest.approx(box_h_plain, abs=1e-6)
+    def test_unknown_figure_does_not_raise(self):
+        line = inlayer.describe_violation({**self.FINDING, "kind": "sealed", "figure": None}, [])
+        assert "#?" in line

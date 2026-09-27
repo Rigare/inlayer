@@ -61,6 +61,22 @@ class TestParallelMap:
         with pytest.raises(ValueError, match="kaputt"):
             inlayer._parallel_map(boom, [1, 2, 3], cfg)
 
+    def test_worker_init_runs_in_every_worker_and_keeps_the_language(self):
+        """The web app attaches Streamlit's context through worker_init. Its own
+        pool used to skip the language hand-over (review N12)."""
+        import threading
+
+        import i18n
+
+        i18n.set_language("de")
+        initialised = set()
+        seen = inlayer._parallel_map(
+            lambda _: (threading.get_ident() in initialised, i18n.get_language()),
+            range(8), Config(enable_parallel=True),
+            worker_init=lambda: initialised.add(threading.get_ident()),
+        )
+        assert seen == [(True, "de")] * 8
+
     def test_parallel_logt_worker_anzahl(self, capsys):
         cfg = Config(enable_parallel=True)
         inlayer._parallel_map(lambda x: x, range(4), cfg, what="Test")
@@ -131,9 +147,7 @@ class TestBuildInlayParallel:
     def test_parallel_liefert_gleiches_ergebnis(
         self, dilated_cube, dilated_sphere, fast_test_config, capsys
     ):
-        arranged = inlayer.arrange_figures(
-            [dilated_cube, dilated_sphere], gap=fast_test_config.wall_thickness
-        )
+        arranged = [dilated_cube, dilated_sphere]
         cfg_par = dataclasses.replace(fast_test_config, enable_parallel=True)
 
         inlay_seq, w1, d1, h1 = inlayer.build_inlay(arranged, fast_test_config)

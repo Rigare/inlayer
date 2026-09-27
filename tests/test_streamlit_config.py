@@ -8,6 +8,8 @@ options before the script starts — so they are pinned down here instead.
 
 from __future__ import annotations
 
+import ast
+import re
 import tomllib
 from pathlib import Path
 
@@ -38,10 +40,73 @@ def test_theme_stays_dark():
     assert _config()["theme"]["base"] == "dark"
 
 
-def test_dockerfile_copies_streamlit_config():
-    """Without that COPY line neither theme nor upload limit reach the container."""
+def _stages(dockerfile: str) -> dict[str, str]:
+    """The Dockerfile split into its stages, by `FROM ... AS <name>`."""
+    stages: dict[str, str] = {}
+    name = None
+    for line in dockerfile.splitlines():
+        match = re.match(r"\s*FROM\s+\S+\s+AS\s+(\S+)", line, re.IGNORECASE)
+        if match:
+            name = match.group(1)
+            stages[name] = ""
+        elif name is not None:
+            stages[name] += line + "\n"
+    return stages
+
+
+def _copied(stage: str) -> set[str]:
+    """Sources of every COPY in a stage (the last argument is the target)."""
+    sources: set[str] = set()
+    for line in stage.splitlines():
+        parts = line.split()
+        if parts and parts[0].upper() == "COPY":
+            sources.update(p.rstrip("/") for p in parts[1:-1] if not p.startswith("--"))
+    return sources
+
+
+def _repo_imports(module: str, seen: set[str] | None = None) -> set[str]:
+    """Repo modules `module` imports, transitively (read from the source)."""
+    seen = set() if seen is None else seen
+    tree = ast.parse((_REPO_ROOT / f"{module}.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module]
+        else:
+            continue
+        for root in (n.split(".")[0] for n in names):
+            if root not in seen and (_REPO_ROOT / f"{root}.py").is_file():
+                seen.add(root)
+                _repo_imports(root, seen)
+    return seen
+
+
+def _missing_in_runtime(dockerfile: str) -> set[str]:
+    """What the runtime image needs to run app.py but does not copy."""
+    needed = {"app.py", ".streamlit"} | {f"{m}.py" for m in _repo_imports("app")}
+    return needed - _copied(_stages(dockerfile).get("runtime", ""))
+
+
+def test_runtime_stage_ships_the_app():
+    """Without its modules the app does not start, without .streamlit/ it runs
+    in the light theme with the upload default. The runtime stage is what
+    compose builds - CI builds it too, but this names the missing file."""
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "COPY .streamlit/" in dockerfile
+    assert _missing_in_runtime(dockerfile) == set()
+
+
+def test_runtime_check_looks_at_the_runtime_stage_only():
+    """The earlier check searched the whole file for "COPY .streamlit/" - the
+    test stage's copy of it satisfied that on its own (review N3)."""
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runtime = _stages(dockerfile)["runtime"]
+    stripped = dockerfile.replace(
+        runtime, runtime.replace("COPY .streamlit/ ./.streamlit/", "")
+    )
+    assert "COPY .streamlit/" in stripped  # still there in the test stage
+    assert _missing_in_runtime(stripped) == {".streamlit"}
+    assert "i18n.py" in _missing_in_runtime(stripped.replace(" i18n.py", ""))
 
 
 def test_no_deprecated_use_container_width_api():

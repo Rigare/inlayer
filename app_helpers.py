@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-from typing import cast
+
 
 import trimesh
 
@@ -54,28 +54,72 @@ def file_hash(path: str) -> str:
     return h.hexdigest()[:_HASH_HEX_LEN]
 
 
+def bytes_hash(data: bytes) -> str:
+    """Same digest as `file_hash`, for content already in memory (uploads)."""
+    return hashlib.sha256(data).hexdigest()[:_HASH_HEX_LEN]
+
+
 def selection_key(axis: str) -> str:
     """Liefert den Session-Key der zugehoerigen Figur-Auswahl."""
     return "selected_rot_fig" if axis.startswith("rot_") else "selected_fig"
 
 
-def recess_position_targets(
-    selected: str, fig_names: list[str], all_sentinel: str
-) -> tuple[str, list[str]]:
-    """Resolves the figure selection of the finger recess position control.
+OFFSET_AXES = ("offset_x", "offset_y", "offset_z")
+ROTATION_AXES = ("rot_x", "rot_y", "rot_z")
+# What a new upload starts with. Settings belong to one upload (its file_id):
+# two different files called model.stl must not move together, and a removed
+# file must not bring its old settings back when it is uploaded again.
+FIGURE_DEFAULTS = {**{a: 0.0 for a in OFFSET_AXES + ROTATION_AXES}, "finger_recess_position": 0.0}
 
-    Returns the reference figure whose stored value the slider shows, and the
-    figures a change writes to. The "all figures" sentinel reads from the first
-    figure and writes to every one of them; a stale selection (a figure that was
-    removed from the upload) falls back to the first figure instead of raising.
+
+def figure_labels(names: list[str]) -> list[str]:
+    """Display names; a repeated file name gets a counter ("model.stl (2)")."""
+    seen: dict[str, int] = {}
+    labels = []
+    for name in names:
+        seen[name] = seen.get(name, 0) + 1
+        labels.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+    return labels
+
+
+def resolve_selection(
+    selected: str, fig_ids: list[str], all_sentinel: str
+) -> tuple[str, str, list[str]]:
+    """Resolves a figure selection against the current uploads.
+
+    Returns (valid selection, reference figure whose stored values the widgets
+    show, figures a change writes to). The "all figures" sentinel reads from
+    the first figure and writes to all; a selection whose upload is gone falls
+    back to the sentinel. One rule for all three per-figure controls (recess
+    position, offsets, rotation) - they used to handle a removed upload in
+    three different ways, one of them not at all.
     """
-    if not fig_names:
+    if not fig_ids:
         raise ValueError(t("error.no_meshes"))
-    if selected == all_sentinel:
-        return fig_names[0], list(fig_names)
-    if selected not in fig_names:
-        return fig_names[0], [fig_names[0]]
-    return selected, [selected]
+    if selected not in fig_ids:
+        return all_sentinel, fig_ids[0], list(fig_ids)
+    return selected, selected, [selected]
+
+
+def applied_figure_params(
+    stored: dict[str, dict], fig_ids: list[str],
+    offsets: bool, rotations: bool, recesses: bool,
+) -> list[dict]:
+    """The per-figure values the pipeline really uses, in upload order.
+
+    A disabled feature counts as zero, whatever is stored. The run, the
+    instant preview and the "settings changed" check all read this - never
+    the slider, which only shows the currently selected figure.
+    """
+    applied = []
+    for fid in fig_ids:
+        s = {**FIGURE_DEFAULTS, **stored.get(fid, {})}
+        applied.append({
+            "offset": tuple(float(s[a]) for a in OFFSET_AXES) if offsets else (0.0, 0.0, 0.0),
+            "rotation": tuple(float(s[a]) for a in ROTATION_AXES) if rotations else (0.0, 0.0, 0.0),
+            "recess_position": float(s["finger_recess_position"]) if recesses else 0.0,
+        })
+    return applied
 
 
 def is_rotation_axis(axis: str) -> bool:
@@ -104,14 +148,24 @@ def quantize_axis_value(axis: str, val: float, step: float) -> float:
 decimate_mesh = inlayer.decimate_mesh
 
 
-def load_preview_mesh(data: bytes, scale: float) -> trimesh.Trimesh:
-    """Laedt eine hochgeladene STL dezimiert fuer die Sofort-Vorschau."""
-    # force="mesh" garantiert ein Trimesh, der Typ von trimesh.load ist aber
-    # Geometry – gleiche cast-Konvention wie in inlayer.prepare_figure.
-    mesh = cast(
-        trimesh.Trimesh,
-        trimesh.load(io.BytesIO(data), file_type="stl", force="mesh"),
-    )
+def preview_copy(mesh: trimesh.Trimesh, face_count: int) -> trimesh.Trimesh:
+    """A decimated copy for the 3D preview: geometry only, never the input.
+
+    Under the face budget decimate_mesh hands back its input unchanged - the
+    process-wide preview cache and every session's state then held the whole
+    object, metadata and cached properties included.
+    """
+    small = decimate_mesh(mesh, face_count)
+    return trimesh.Trimesh(vertices=small.vertices.copy(), faces=small.faces.copy(), process=False)
+
+
+def load_preview_mesh(data: bytes, scale: float, name: str) -> trimesh.Trimesh:
+    """Loads an uploaded STL, decimated for the instant preview.
+
+    Raises ValueError naming the file if it holds no triangles (same loader as
+    the pipeline, so preview and run reject the same files).
+    """
+    mesh = inlayer.load_mesh(io.BytesIO(data), name, file_type="stl")
     if scale != 1.0:
         mesh.apply_scale(scale)
     return decimate_mesh(mesh, PREVIEW_FACE_BUDGET)

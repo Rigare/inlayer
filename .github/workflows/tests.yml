@@ -5,7 +5,8 @@
 #   docker  - the same suite inside the pinned python:3.13-slim image, which is
 #             the deploy path. It is the only place that catches a broken
 #             version pin from requirements.txt or a new source file missing
-#             from the Dockerfile's explicit COPY list (see AGENTS.md).
+#             from the Dockerfile's explicit COPY list (see AGENTS.md). It then
+#             builds the runtime stage and checks that the app comes up.
 #
 # No apt step in the pytest job: none of the runtime wheels link against libGL
 # or libglib, the Dockerfile installs those only because python:3.13-slim ships
@@ -63,3 +64,21 @@ jobs:
       # The test stage runs pytest during the build: a red test fails the build.
       - name: Build test stage
         run: docker build --target test .
+
+      # The runtime stage is what compose deploys. It copies its files one by
+      # one, so a module missing there only showed up at deploy time.
+      - name: Build runtime stage
+        run: docker build --target runtime -t inlayer:ci .
+
+      # Imports catch a missing module; the health check that the app really
+      # comes up as appuser (useradd, permissions, CMD).
+      - name: Smoke-test the runtime image
+        run: |
+          docker run --rm inlayer:ci python -c "import app_helpers, inlayer, i18n"
+          docker run -d --name inlayer-smoke -p 8501:8501 inlayer:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8501/_stcore/health && exit 0
+            sleep 2
+          done
+          docker logs inlayer-smoke
+          exit 1

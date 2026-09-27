@@ -31,6 +31,15 @@ DYNAMIC_KEYS = (
     "app.layout.compact",
     "app.layout.horizontal",
     "app.layout.vertical",
+    "app.finger.axis.x",
+    "app.finger.axis.y",
+    # inlayer.describe_violation: t_(f"check.{kind}")
+    "check.side",
+    "check.floor",
+    "check.inner",
+    "check.merged",
+    "check.sealed",
+    "check.no_cavity",
 )
 
 
@@ -166,6 +175,12 @@ class TestLanguageState:
 
     def test_default_language_is_supported(self):
         assert i18n.DEFAULT_LANGUAGE in i18n.LANGUAGES
+
+    def test_suite_pins_the_environment_too(self):
+        """CLI subprocesses inherit the environment, not the ContextVar."""
+        import os
+
+        assert os.environ[i18n.ENV_VAR] == "en"
 
     def test_language_from_env(self, monkeypatch):
         monkeypatch.setenv(i18n.ENV_VAR, "de")

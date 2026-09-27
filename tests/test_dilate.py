@@ -66,6 +66,47 @@ class TestDilateConfig:
         assert isinstance(m, trimesh.Trimesh)
         assert len(m.faces) > 0
 
+class TestIsotropicClearance:
+    """Slopes get the same clearance as axis-parallel faces (review B27).
+
+    scipy's default structuring element grows an octahedron: with 2 mm of
+    clearance a sphere got 2.11 mm along the axes but 1.50 mm along the space
+    diagonals - the figure jammed on slopes.
+    """
+
+    DIRECTIONS = np.array(
+        [d for d in np.ndindex(3, 3, 3) if d != (1, 1, 1)], dtype=float
+    ) - 1.0  # the 26 axis, face-diagonal and space-diagonal directions
+
+    @staticmethod
+    def _radius(mesh, direction) -> float:
+        from tests.geometry_probe import to_manifold
+
+        d = direction / np.linalg.norm(direction)
+        return float(np.linalg.norm(to_manifold(mesh).ray_cast((0.0, 0.0, 0.0), tuple(d * 50.0))[0].position))
+
+    @pytest.mark.parametrize("clearance,pitch", [(2.0, 0.4), (1.0, 0.5)])
+    def test_dilation_grows_the_same_in_every_direction(self, tmp_path, clearance, pitch):
+        """What dilate adds, per direction, measured by ray from the centre.
+
+        Compared with the prepared figure rather than the analytic sphere:
+        voxelizing the input already puts the surface 0.20-0.32 mm out
+        depending on the direction (at pitch 0.4) - discretization, not
+        dilate's doing.
+        """
+        cfg = Config(clearance=clearance, voxel_pitch=pitch, decimate_faces=5000)
+        path = tmp_path / "sphere.stl"
+        trimesh.creation.icosphere(subdivisions=4, radius=10.0).export(file_obj=str(path))
+        prepared = inlayer.prepare_figure(str(path), cfg)
+        dilated = inlayer.dilate(prepared, cfg.clearance, cfg)
+        growth = np.array([
+            self._radius(dilated, d) - self._radius(prepared, d) for d in self.DIRECTIONS
+        ])
+        # The cross-only dilation grew 1.9 mm along the axes, ~1.1 mm along
+        # the space diagonals
+        assert np.ptp(growth) <= pitch / 4, growth.round(3)
+
+
 @pytest.mark.slow
 class TestEffectiveClearance:
     """Regressionstest fuer die Inflations-Kompensation in dilate.

@@ -17,12 +17,9 @@
 import io
 import os
 import time
-import hashlib
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 import trimesh
@@ -99,7 +96,7 @@ st.markdown(
 def _cached_prepare(
     _path: str, file_hash: str, scale: float, pitch: float, decimate_faces: int
 ) -> trimesh.Trimesh:
-    """Schritt 1 wird zwischengespeichert, wenn sich Eingabedatei / Parameter nicht ändern."""
+    """Step 1, cached as long as file content and parameters stay the same."""
     config = inlayer.Config(
         stl_unit_to_mm=scale, voxel_pitch=pitch, decimate_faces=decimate_faces
     )
@@ -118,50 +115,43 @@ def _cached_dilate(
     rot_y: float,
     rot_z: float,
 ) -> trimesh.Trimesh:
-    """Schritt 2 (Dilation) wird zwischengespeichert, wenn sich Figur / clearance / pitch / rotation nicht ändern."""
+    """Step 2, cached as long as figure, clearance, pitch and rotation stay the same."""
     config = inlayer.Config(voxel_pitch=pitch)
     return inlayer.dilate(_mesh, clearance, config)
 
 
 _file_hash = app_helpers.file_hash
 
-
-def _parallel_map_app(fn, items):
-    """Fuehrt fn parallel ueber items aus (ThreadPool) und reicht den
-    Streamlit-ScriptRunContext an die Worker-Threads weiter, damit
-    st.cache_resource-Aufrufe dort ohne Warnung funktionieren."""
-    ctx = get_script_run_ctx()
-
-    def _with_ctx(item):
-        if ctx is not None:
-            add_script_run_ctx(threading.current_thread(), ctx)
-        return fn(item)
-
-    workers = inlayer._effective_workers(len(items))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        return list(ex.map(_with_ctx, items))
+# Face budget of the inlay in the result view
+INLAY_PREVIEW_FACES = 30000
 
 
 @st.cache_resource(show_spinner=False, max_entries=64)
 def _decimated_for_viz(
     _mesh: trimesh.Trimesh, cache_key: str, face_count: int
 ) -> trimesh.Trimesh:
-    """Dezimiert ein Mesh fuer die 3D-Vorschau (gecacht ueber cache_key).
+    """Decimated copy of a figure for the 3D preview, cached under cache_key.
 
-    cache_key identifiziert das Ergebnis-Mesh stabil, sodass die teure
-    Dezimierung bei reinen Reruns (z.B. Widget-Interaktionen) nicht erneut laeuft.
+    Shared by every session in the process: the key has to name everything
+    that determines the mesh (see "fig_cache_keys" below).
     """
-    return app_helpers.decimate_mesh(_mesh, face_count)
+    return app_helpers.preview_copy(_mesh, face_count)
 
 
 @st.cache_resource(show_spinner=False, max_entries=32)
-def _preview_mesh(_data: bytes, cache_key: str, scale: float) -> trimesh.Trimesh:
-    """Laedt eine hochgeladene STL dezimiert fuer die Sofort-Vorschau (gecacht)."""
-    return app_helpers.load_preview_mesh(_data, scale)
+def _preview_mesh(_data: bytes, content_hash: str, scale: float, _name: str) -> trimesh.Trimesh:
+    """Loads an uploaded STL, decimated, for the instant preview (cached).
+
+    The cache is process-wide, so the key must identify the mesh by content:
+    keyed by name and size, a second user uploading a different `model.stl`
+    of the same size was shown the first user's model. With a content hash a
+    session only ever gets a cached object for bytes it uploaded itself.
+    """
+    return app_helpers.load_preview_mesh(_data, scale, _name)
 
 
-# --- Plotly-Helfer ------------------------------------------------------------
-# Farbpalette fuer Figuren-Traces (Sofort-Vorschau und Ergebnis-Ansicht)
+# --- Plotly helpers ---------------------------------------------------------
+# Colour palette of the figure traces (instant preview and result view)
 _fig_colors = [
     "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#bcbd22", "#17becf",
@@ -169,7 +159,7 @@ _fig_colors = [
 
 
 def _mesh3d(mesh: trimesh.Trimesh, **kwargs) -> go.Mesh3d:
-    """Plotly-Mesh3d-Trace aus einem trimesh-Mesh."""
+    """Plotly Mesh3d trace of a trimesh mesh."""
     return go.Mesh3d(
         x=mesh.vertices[:, 0], y=mesh.vertices[:, 1], z=mesh.vertices[:, 2],
         i=mesh.faces[:, 0], j=mesh.faces[:, 1], k=mesh.faces[:, 2],
@@ -194,6 +184,10 @@ class StreamlitLogger:
 
 
 # --- UI ---------------------------------------------------------------------
+# Every widget has a fixed, language-independent key. Streamlit derives the
+# identity of an unkeyed widget from its label - which is translated, so a
+# language switch created new widgets: the uploads vanished and every setting
+# fell back to its default. tests/test_app_render.py fails on an unkeyed widget.
 st.markdown('<div class="main-title">Inlayer 3D</div>', unsafe_allow_html=True)
 st.markdown(
     f'<div class="subtitle">{t("app.subtitle")}</div>',
@@ -210,115 +204,239 @@ st.sidebar.selectbox(
 
 st.sidebar.markdown(t("app.sidebar.pipeline_params"))
 uploaded_files = st.sidebar.file_uploader(
-    t("app.upload.label"), type=["stl"], accept_multiple_files=True,
-)
-# Leere Liste normalisieren
-if not uploaded_files:
-    uploaded_files = []
+    t("app.upload.label"), type=["stl"], accept_multiple_files=True, key="uploads",
+) or []
 multi_mode = len(uploaded_files) > 1
 if multi_mode:
     st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
 
-# Session state. Deliberately right after the upload instead of further down:
-# the finger recess controls above it in the sidebar already address individual
-# figures and need fig_names.
-fig_names = [uf.name for uf in uploaded_files] if uploaded_files else ["figur.stl"]
-if "fig_offsets_dict" not in st.session_state:
-    st.session_state["fig_offsets_dict"] = {}
+# Content hash per upload, computed once per upload rather than on every rerun.
+# It is the identity of a file in every process-wide cache key and in the
+# staleness snapshot - name and size are not (see _preview_mesh).
+_known_hashes = st.session_state.get("_hash_by_file_id", {})
+content_hashes = {
+    uf.file_id: _known_hashes.get(uf.file_id) or app_helpers.bytes_hash(uf.getvalue())
+    for uf in uploaded_files
+}
+st.session_state["_hash_by_file_id"] = content_hashes
 
-for name in fig_names:
-    if name not in st.session_state["fig_offsets_dict"]:
-        st.session_state["fig_offsets_dict"][name] = {}
-    for k, default_val in [
-        ("offset_x", 0.0), ("offset_y", 0.0), ("offset_z", 0.0),
-        ("rot_x", 0.0), ("rot_y", 0.0), ("rot_z", 0.0),
-        ("finger_recess_position", 0.0),
-    ]:
-        if k not in st.session_state["fig_offsets_dict"][name]:
-            st.session_state["fig_offsets_dict"][name][k] = default_val
+# --- Per-figure state -------------------------------------------------------
+# Deliberately right after the upload: the finger recess controls sit further
+# up the sidebar than the manual offsets and already address single figures.
+# A figure is identified by its upload (file_id), not its file name: two
+# different model.stl files used to share one entry and moved together. The
+# option values are ids (like ALL_FIGURES, never translated); _fig_label shows
+# the name.
+FALLBACK_ID = "__fallback__"
+OFFSET_AXES, ROTATION_AXES = app_helpers.OFFSET_AXES, app_helpers.ROTATION_AXES
+fig_ids = [uf.file_id for uf in uploaded_files] or [FALLBACK_ID]
+_labels = dict(zip(
+    fig_ids,
+    app_helpers.figure_labels([uf.name for uf in uploaded_files]) or [inlayer.DEFAULT_INPUT],
+))
 
-# A removed upload must not leave a dangling selection behind: Streamlit rejects
-# a session-state value that is not among a selectbox's options. The equivalent
-# reset for the position/rotation selections follows further down, next to them.
-if st.session_state.get("selected_recess_fig") not in [ALL_FIGURES] + fig_names:
-    st.session_state["selected_recess_fig"] = ALL_FIGURES
+stored = st.session_state.setdefault("fig_offsets_dict", {})
+# A removed upload takes its settings along; uploaded again, it starts fresh.
+for _gone in set(stored) - set(fig_ids):
+    del stored[_gone]
+for _fid in fig_ids:
+    stored.setdefault(_fid, dict(app_helpers.FIGURE_DEFAULTS))
 
 
-def _fig_label(name: str) -> str:
-    """Label of a figure selection: sentinel translated, file names raw.
+_labels[ALL_FIGURES] = t("app.all_figures")
 
-    Defined this early because the finger recess selection above already
-    formats with it.
+
+def _fig_label(fid: str) -> str:
+    """Label of a figure option: sentinel translated, uploads by unique name."""
+    return _labels.get(fid, fid)
+
+
+def _select(label: str, labels: dict, key: str, default, **kwargs):
+    """Selectbox over `labels` (value -> display text) whose value lives in a
+    plain session key (`key`).
+
+    Streamlit drops a widget's state while the widget is not rendered, and it
+    sends a selectbox's value as its *label*. Hiding the rotation section put
+    the step back to 45° (a stored 350° then exceeded the slider's max and
+    every rerun raised); after a language switch the old label matched no
+    option - a lenient format_func turned "left/right" into the recess axis,
+    a strict one reset the box shape to its default. So the raw value is kept
+    here, seeds `index`, and the widget only writes through. The labels are
+    resolved once per run and unknown values map to no label at all.
     """
-    return t("app.all_figures") if name == ALL_FIGURES else name
+    st.session_state.setdefault(key, default)
+    widget_key = f"_w_{key}"
+    options = list(labels)
+    return st.sidebar.selectbox(
+        label, options,
+        index=options.index(st.session_state[key]),
+        format_func=lambda v: labels.get(v, str(v)),
+        key=widget_key,
+        on_change=lambda: st.session_state.update({key: st.session_state[widget_key]}),
+        **kwargs,
+    )
+
+
+def _step_select(label: str, options: list[float], unit: str, step_key: str) -> float:
+    """Step size of the offset or rotation sliders."""
+    return float(_select(label, {x: f"{int(x)}{unit}" for x in options},
+                         step_key, STEP_DEFAULTS[step_key]))
+
+
+STEP_DEFAULTS = {"rot_step": 45.0, "pos_step": 10.0}
+for _step_key, _step_default in STEP_DEFAULTS.items():
+    st.session_state.setdefault(_step_key, _step_default)
+
+
+def _quantize_axis(axis: str, val: float) -> float:
+    """Quantizes with the current step size of the axis kind."""
+    step_key = "rot_step" if app_helpers.is_rotation_axis(axis) else "pos_step"
+    return app_helpers.quantize_axis_value(axis, val, float(st.session_state[step_key]))
+
+
+def _requantize_axes(axes: tuple[str, ...]):
+    """Snaps every stored value and every display key to the current step.
+
+    Runs on every rerun, before the sliders exist: that keeps what the sliders
+    show and what the pipeline reads identical, and keeps each value inside
+    its slider's range whatever step it was stored with.
+    """
+    for offsets in stored.values():
+        for axis in axes:
+            offsets[axis] = _quantize_axis(axis, offsets.get(axis, 0.0))
+    for axis in axes:
+        if axis in st.session_state:
+            val = _quantize_axis(axis, st.session_state[axis])
+            st.session_state[axis] = val
+            st.session_state[f"_sl_{axis}"] = val
+            st.session_state[f"_ni_{axis}"] = val
+
+
+RECESS_SELECT = "selected_recess_fig"
+# Widget key of the recess position: one slider for every figure, loaded with
+# the selected figure's stored value.
+RECESS_POS_KEY = "_sl_finger_recess_position"
+_selection_key = app_helpers.selection_key
+
+
+def _targets(sel_key: str) -> list[str]:
+    """The figures a change of that control writes to."""
+    return app_helpers.resolve_selection(
+        st.session_state.get(sel_key, ALL_FIGURES), fig_ids, ALL_FIGURES
+    )[2]
+
+
+def _load_axes(ref: str, axes: tuple[str, ...]):
+    for axis in axes:
+        value = stored[ref][axis]
+        st.session_state[axis] = value
+        st.session_state[f"_sl_{axis}"] = value
+        st.session_state[f"_ni_{axis}"] = value
+
+
+def _load_recess(ref: str):
+    st.session_state[RECESS_POS_KEY] = int(round(stored[ref]["finger_recess_position"] * 100))
+
+
+def _store_axis_value(axis: str, val: float):
+    """Quantizes the value, mirrors it into all its widget keys and stores it
+    for the currently selected figure(s)."""
+    val = _quantize_axis(axis, val)
+    st.session_state[axis] = val
+    st.session_state[f"_sl_{axis}"] = val
+    st.session_state[f"_ni_{axis}"] = val
+    for fid in _targets(_selection_key(axis)):
+        stored[fid][axis] = val
+
+
+def _sync_from_slider(axis: str):
+    _store_axis_value(axis, st.session_state[f"_sl_{axis}"])
+
+
+def _sync_from_input(axis: str):
+    _store_axis_value(axis, st.session_state[f"_ni_{axis}"])
+
+
+def _store_recess_position():
+    """Writes the slider value to the currently selected figure(s)."""
+    value = float(st.session_state[RECESS_POS_KEY]) / 100.0
+    for fid in _targets(RECESS_SELECT):
+        stored[fid]["finger_recess_position"] = value
+
+
+_requantize_axes(OFFSET_AXES + ROTATION_AXES)
+
+# Bring every selection - and the widgets it drives - in line with the current
+# uploads, before any widget exists (Streamlit forbids setting widget state
+# afterwards). The widgets are reloaded from the stored values whenever the
+# figure they show changes: a figure was removed, the first one changed under
+# "all figures", a selection was reset - or their state was dropped while
+# hidden. The selection callbacks alone missed all of that: the sliders kept
+# the previous figure's values while the pipeline used the stored ones.
+for _sel_key, _load, _shown in (
+    (RECESS_SELECT, _load_recess, [RECESS_POS_KEY]),
+    ("selected_fig", lambda ref: _load_axes(ref, OFFSET_AXES),
+     [f"_{w}_{a}" for a in OFFSET_AXES for w in ("sl", "ni")]),
+    ("selected_rot_fig", lambda ref: _load_axes(ref, ROTATION_AXES),
+     [f"_{w}_{a}" for a in ROTATION_AXES for w in ("sl", "ni")]),
+):
+    _selection, _ref, _ = app_helpers.resolve_selection(
+        st.session_state.get(_sel_key, ALL_FIGURES), fig_ids, ALL_FIGURES
+    )
+    st.session_state[_sel_key] = _selection
+    if st.session_state.get(f"_ref_{_sel_key}") != _ref or any(
+        k not in st.session_state for k in _shown
+    ):
+        _load(_ref)
+        st.session_state[f"_ref_{_sel_key}"] = _ref
+
+
+def _figure_select(label: str, sel_key: str):
+    """Selection "all figures" / one figure - only offered with several figures."""
+    if len(fig_ids) > 1:
+        st.sidebar.selectbox(
+            label, [ALL_FIGURES] + fig_ids, format_func=_fig_label, key=sel_key,
+        )
+
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.printer.heading"))
 
 clearance = st.sidebar.slider(
     t("app.clearance.label"), min_value=0.1, max_value=2.0, value=0.4, step=0.1,
-    help=t("app.clearance.help"),
+    help=t("app.clearance.help"), key="clearance",
 )
 wall_thickness = st.sidebar.slider(
     t("app.wall_thickness.label"), min_value=1.0, max_value=5.0, value=2.0, step=0.5,
-    help=t("app.wall_thickness.help"),
+    help=t("app.wall_thickness.help"), key="wall_thickness",
 )
 depth_fraction = st.sidebar.slider(
     t("app.depth_fraction.label"), min_value=0.3, max_value=1.0, value=0.7, step=0.05,
-    help=t("app.depth_fraction.help"),
+    help=t("app.depth_fraction.help"), key="depth_fraction",
 )
 voxel_pitch = st.sidebar.slider(
     t("app.voxel_pitch.label"), min_value=0.2, max_value=1.0, value=0.4, step=0.1,
-    help=t("app.voxel_pitch.help"),
+    help=t("app.voxel_pitch.help"), key="voxel_pitch",
 )
 decimate_faces = st.sidebar.number_input(
     t("app.decimate_faces.label"), min_value=5000, max_value=50000, value=20000, step=5000,
-    help=t("app.decimate_faces.help"),
+    help=t("app.decimate_faces.help"), key="decimate_faces",
 )
 scale = st.sidebar.number_input(
     t("app.scale.label"), min_value=0.01, max_value=100.0, value=1.0, step=0.1,
-    help=t("app.scale.help"),
+    help=t("app.scale.help"), key="scale",
 )
 
 # --- Finger recesses: position per figure -----------------------------------
-# Widget key of the recess position. A single key (not one per figure), reloaded
-# whenever the figure selection changes - same approach as the manual offsets.
-RECESS_POS_KEY = "_sl_finger_recess_position"
-
-
-def _recess_percent(name: str) -> int:
-    """A figure's stored recess position as the slider's percent value."""
-    stored = st.session_state["fig_offsets_dict"].get(name, {}).get("finger_recess_position", 0.0)
-    return int(round(float(stored) * 100))
-
-
-def _store_recess_position():
-    """Writes the slider value to the currently selected figure(s)."""
-    value = float(st.session_state[RECESS_POS_KEY]) / 100.0
-    _, targets = app_helpers.recess_position_targets(
-        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
-    )
-    for name in targets:
-        st.session_state["fig_offsets_dict"][name]["finger_recess_position"] = value
-
-
-def _on_recess_fig_selected():
-    """Loads the newly selected figure's stored value into the slider."""
-    ref, _ = app_helpers.recess_position_targets(
-        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
-    )
-    st.session_state[RECESS_POS_KEY] = _recess_percent(ref)
-
-
 enable_finger_recesses = st.sidebar.checkbox(
     t("app.finger.enable.label"),
     value=False,
     help=t("app.finger.enable.help"),
+    key="finger_enabled",
 )
 finger_radius = 8.0
 finger_recess_axis = "x"
 finger_recess_z_offset = 0.0
-finger_recess_position = 0.0
 if enable_finger_recesses:
     finger_radius = st.sidebar.slider(
         t("app.finger.radius.label"),
@@ -327,11 +445,11 @@ if enable_finger_recesses:
         value=8.0,
         step=0.5,
         help=t("app.finger.radius.help"),
+        key="finger_radius",
     )
-    finger_recess_axis = st.sidebar.selectbox(
+    finger_recess_axis = _select(
         t("app.finger.axis.label"),
-        options=["x", "y"],
-        format_func=lambda a: t("app.finger.axis.x") if a == "x" else t("app.finger.axis.y"),
+        {"x": t("app.finger.axis.x"), "y": t("app.finger.axis.y")}, "finger_axis", "x",
         help=t("app.finger.axis.help"),
     )
     finger_recess_z_offset = st.sidebar.slider(
@@ -341,30 +459,13 @@ if enable_finger_recesses:
         value=0.0,
         step=0.5,
         help=t("app.finger.z_offset.help"),
+        key="finger_z_offset",
     )
     # Position along the figure. Unlike radius, axis and depth this one is
     # stored per figure: the best grip point follows the figure's shape, so one
     # shared value is wrong as soon as two differently shaped models share an
-    # inlay. Same slider-plus-selection pattern as the manual offsets further
-    # down (store on change, load on selection change) - but with its own
-    # callbacks, because _axis_row quantizes in mm/degrees, which does not fit
-    # a relative position.
-    if len(fig_names) > 1:
-        st.sidebar.selectbox(
-            t("app.finger.position.select_fig"),
-            [ALL_FIGURES] + fig_names,
-            format_func=_fig_label,
-            key="selected_recess_fig",
-            on_change=_on_recess_fig_selected,
-        )
-    _recess_ref, _ = app_helpers.recess_position_targets(
-        st.session_state.get("selected_recess_fig", ALL_FIGURES), fig_names, ALL_FIGURES
-    )
-    if RECESS_POS_KEY not in st.session_state:
-        st.session_state[RECESS_POS_KEY] = _recess_percent(_recess_ref)
-
-    # Percent in the UI, fraction (-1.0 ... 1.0) in the pipeline - the slider is
-    # the more readable unit, the pipeline works relative to the half length.
+    # inlay. Percent in the UI, fraction (-1.0 ... 1.0) in the pipeline.
+    _figure_select(t("app.finger.position.select_fig"), RECESS_SELECT)
     st.sidebar.slider(
         t("app.finger.position.label"),
         min_value=-100,
@@ -374,9 +475,6 @@ if enable_finger_recesses:
         on_change=_store_recess_position,
         help=t("app.finger.position.help"),
     )
-    # No write-through outside the callback: with "all figures" selected that
-    # would overwrite every per-figure value on each rerun.
-    finger_recess_position = st.session_state[RECESS_POS_KEY] / 100.0
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.performance.heading"))
@@ -384,16 +482,14 @@ enable_parallel = st.sidebar.checkbox(
     t("app.parallel.label"),
     value=False,
     help=t("app.parallel.help", workers=inlayer.MAX_PARALLEL_WORKERS),
+    key="parallel",
 )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.box.heading"))
-box_shape = st.sidebar.selectbox(
+box_shape = _select(
     t("app.box.shape.label"),
-    options=["box", "cylinder"],
-    format_func=lambda x: t(f"app.box.shape.{x}"),
-    index=0,
-    key="box_shape",
+    {"box": t("app.box.shape.box"), "cylinder": t("app.box.shape.cylinder")}, "box_shape", "box",
     help=t("app.box.shape.help"),
 )
 use_custom_box = st.sidebar.checkbox(t("app.box.custom.label"), value=False, key="use_custom_box")
@@ -413,29 +509,34 @@ if use_custom_box:
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.position.heading"))
 
-# Callbacks für Figurenabstand-Synchronisierung
+
 def _sync_gap_from_slider():
     val = st.session_state["_sl_figure_gap"]
     st.session_state["figure_gap"] = val
     st.session_state["_ni_figure_gap"] = val
+    st.session_state["_gap_user_set"] = True
+
 
 def _sync_gap_from_input():
     val = st.session_state["_ni_figure_gap"]
     st.session_state["figure_gap"] = val
     st.session_state["_sl_figure_gap"] = val
+    st.session_state["_gap_user_set"] = True
 
-# figure_gap: nur bei mehreren Figuren relevant, aber immer verfügbar
+
+# figure_gap only matters with several figures
 if multi_mode:
-    if "figure_gap" not in st.session_state:
-        st.session_state["figure_gap"] = wall_thickness
-    if "_sl_figure_gap" not in st.session_state:
-        st.session_state["_sl_figure_gap"] = float(st.session_state["figure_gap"])
-    if "_ni_figure_gap" not in st.session_state:
-        st.session_state["_ni_figure_gap"] = float(st.session_state["figure_gap"])
+    # The gap defaults to the wall thickness and keeps following it until the
+    # user sets one of their own - as the help text and the CLI say. It used
+    # to be copied once, so changing the wall thickness left the gap behind.
+    if not st.session_state.get("_gap_user_set"):
+        for _key in ("figure_gap", "_sl_figure_gap", "_ni_figure_gap"):
+            st.session_state[_key] = float(wall_thickness)
+    for _key in ("_sl_figure_gap", "_ni_figure_gap"):
+        st.session_state.setdefault(_key, float(st.session_state["figure_gap"]))
 
-    # Gemeinsame Beschriftung fuer Slider + Zahlenfeld (beide mit
-    # label_visibility="collapsed"). Keine feste Farbe: der Text muss der
-    # Theme-Textfarbe folgen, sonst ist er im hellen Theme unlesbar.
+    # One caption for slider and number field (both label_visibility="collapsed").
+    # No fixed colour: the text has to follow the theme's text colour.
     st.sidebar.markdown(
         f'<span style="font-size:0.9rem;">{t("app.gap.label")}</span>',
         unsafe_allow_html=True
@@ -464,143 +565,31 @@ if multi_mode:
 else:
     figure_gap = None
 
-layout_style = st.sidebar.selectbox(
+layout_style = _select(
     t("app.layout.label"),
-    options=["compact", "horizontal", "vertical"],
-    format_func=lambda x: t(f"app.layout.{x}"),
-    index=0,
-    key="layout_style",
-    help=t("app.layout.help")
+    {x: t(f"app.layout.{x}") for x in ("compact", "horizontal", "vertical")}, "layout_style", "compact",
+    help=t("app.layout.help"),
 ) if multi_mode else "compact"
 
-# Falls die ausgewählte Figur nicht mehr existiert, auf die erste zurücksetzen
-valid_fig_names = [ALL_FIGURES] + fig_names if len(fig_names) > 1 else fig_names
-if "selected_fig" in st.session_state and st.session_state["selected_fig"] not in valid_fig_names:
-    st.session_state["selected_fig"] = valid_fig_names[0]
 
-selected_fig = st.session_state.get("selected_fig", valid_fig_names[0])
-if selected_fig not in valid_fig_names:
-    selected_fig = valid_fig_names[0]
-    st.session_state["selected_fig"] = selected_fig
-
-# --- Callback-Helfer (Slider ↔ Eingabefeld ↔ fig_offsets_dict) --------------
-# Rotationsachsen tragen das Praefix "rot_" und werden modulo 360 quantisiert;
-# Positionsachsen ("offset_") werden auf die jeweilige Schrittweite gerundet.
-
-def _quantize_axis(axis: str, val: float) -> float:
-    """Holt die Schrittweite aus dem Session-State und quantisiert damit."""
-    if app_helpers.is_rotation_axis(axis):
-        step = float(st.session_state.get("rot_step_size", 45.0))
-    else:
-        step = float(st.session_state.get("pos_step_size", 10.0))
-    return app_helpers.quantize_axis_value(axis, val, step)
-
-
-_selection_key = app_helpers.selection_key
-
-
-def _store_axis_value(axis: str, val: float):
-    """Quantisiert den Wert, spiegelt ihn in alle Widget-Keys und speichert ihn
-    fuer die aktuell ausgewaehlte(n) Figur(en) im fig_offsets_dict."""
-    val = _quantize_axis(axis, val)
-    st.session_state[axis] = val
-    st.session_state[f"_sl_{axis}"] = val
-    st.session_state[f"_ni_{axis}"] = val
-    selected = st.session_state.get(_selection_key(axis), ALL_FIGURES)
-    offsets_dict = st.session_state.get("fig_offsets_dict", {})
-    targets = fig_names if selected == ALL_FIGURES else [selected]
-    for name in targets:
-        if name in offsets_dict:
-            offsets_dict[name][axis] = val
-
-def _sync_from_slider(axis: str):
-    _store_axis_value(axis, st.session_state[f"_sl_{axis}"])
-
-def _sync_from_input(axis: str):
-    _store_axis_value(axis, st.session_state[f"_ni_{axis}"])
-
-def _load_axes_from_selection(axes: list[str]):
-    """Laedt die gespeicherten Werte der ausgewaehlten Figur in die Widgets."""
-    selected = st.session_state.get(_selection_key(axes[0]), ALL_FIGURES)
-    ref = fig_names[0] if selected == ALL_FIGURES else selected
-    offsets = st.session_state.get("fig_offsets_dict", {}).get(ref)
-    if not offsets:
-        return
-    for axis in axes:
-        st.session_state[axis] = offsets[axis]
-        st.session_state[f"_sl_{axis}"] = offsets[axis]
-        st.session_state[f"_ni_{axis}"] = offsets[axis]
-
-def _requantize_axes(axes: list[str]):
-    """Snappt alle gespeicherten Werte der Achsen auf die neue Schrittweite."""
-    offsets_dict = st.session_state.get("fig_offsets_dict", {})
-    for name in fig_names:
-        if name in offsets_dict:
-            for axis in axes:
-                offsets_dict[name][axis] = _quantize_axis(axis, offsets_dict[name].get(axis, 0.0))
-    for axis in axes:
-        if axis in st.session_state:
-            val = _quantize_axis(axis, st.session_state[axis])
-            st.session_state[axis] = val
-            st.session_state[f"_sl_{axis}"] = val
-            st.session_state[f"_ni_{axis}"] = val
-
-def _on_fig_selected():
-    _load_axes_from_selection(["offset_x", "offset_y", "offset_z"])
-
-def _on_rot_fig_selected():
-    _load_axes_from_selection(["rot_x", "rot_y", "rot_z"])
-
-def _on_rot_step_change():
-    _requantize_axes(["rot_x", "rot_y", "rot_z"])
-
-def _on_pos_step_change():
-    _requantize_axes(["offset_x", "offset_y", "offset_z"])
-
-
-# Sicherstellen, dass die Werte für das aktuelle Widget geladen sind
-# 1. Positionen
-selected_pos_fig = st.session_state.get("selected_fig", ALL_FIGURES)
-ref_pos_fig = fig_names[0] if selected_pos_fig == ALL_FIGURES else selected_pos_fig
-if ref_pos_fig not in fig_names:
-    ref_pos_fig = fig_names[0]
-offsets_pos = st.session_state["fig_offsets_dict"][ref_pos_fig]
-for axis in ["offset_x", "offset_y", "offset_z"]:
-    if axis not in st.session_state:
-        st.session_state[axis] = offsets_pos[axis]
-    if f"_sl_{axis}" not in st.session_state:
-        st.session_state[f"_sl_{axis}"] = offsets_pos[axis]
-    if f"_ni_{axis}" not in st.session_state:
-        st.session_state[f"_ni_{axis}"] = offsets_pos[axis]
-
-# 2. Rotationen
-selected_rot_fig = st.session_state.get("selected_rot_fig", ALL_FIGURES)
-ref_rot_fig = fig_names[0] if selected_rot_fig == ALL_FIGURES else selected_rot_fig
-if ref_rot_fig not in fig_names:
-    ref_rot_fig = fig_names[0]
-offsets_rot = st.session_state["fig_offsets_dict"][ref_rot_fig]
-for axis in ["rot_x", "rot_y", "rot_z"]:
-    if axis not in st.session_state:
-        st.session_state[axis] = offsets_rot[axis]
-    if f"_sl_{axis}" not in st.session_state:
-        st.session_state[f"_sl_{axis}"] = offsets_rot[axis]
-    if f"_ni_{axis}" not in st.session_state:
-        st.session_state[f"_ni_{axis}"] = offsets_rot[axis]
-
-# Manuelle Positionierung / Rotation (pro Figur oder fuer alle)
 def _axis_row(axis: str, label: str, lo: float, hi: float, step: float, hint: str):
-    """Slider + Zahlenfeld fuer eine Achse, synchronisiert ueber die _sync-Callbacks."""
+    """Slider + number field of one axis, kept in sync through _store_axis_value.
+
+    No `value=`: the keys are always set before the widgets exist (see the
+    selection sync above), and a default next to a state value only earns a
+    Streamlit warning.
+    """
     c1, c2 = st.sidebar.columns([3, 1])
     with c1:
         st.slider(
-            label, lo, hi, float(st.session_state[axis]), step,
+            label, lo, hi, step=step,
             key=f"_sl_{axis}",
             on_change=_sync_from_slider, args=(axis,),
             help=hint,
         )
     with c2:
         st.number_input(
-            label, lo, hi, float(st.session_state[axis]), step,
+            label, lo, hi, step=step,
             key=f"_ni_{axis}",
             on_change=_sync_from_input, args=(axis,),
             label_visibility="collapsed",
@@ -611,28 +600,12 @@ enable_manual_offsets = st.sidebar.checkbox(
     t("app.manual_offsets.label"),
     value=False,
     help=t("app.manual_offsets.help"),
+    key="manual_offsets",
 )
 
 if enable_manual_offsets:
-    if len(fig_names) > 1:
-        st.sidebar.selectbox(
-            t("app.select_fig_position"),
-            [ALL_FIGURES] + fig_names,
-            format_func=_fig_label,
-            key="selected_fig",
-            on_change=_on_fig_selected,
-        )
-
-    # Schrittweite für Positionierung
-    st.sidebar.selectbox(
-        t("app.pos_step.label"),
-        options=[1.0, 5.0, 10.0],
-        format_func=lambda x: f"{int(x)} mm",
-        index=2,
-        key="pos_step_size",
-        on_change=_on_pos_step_change,
-    )
-    pos_step = float(st.session_state.get("pos_step_size", 10.0))
+    _figure_select(t("app.select_fig_position"), "selected_fig")
+    pos_step = _step_select(t("app.pos_step.label"), [1.0, 5.0, 10.0], " mm", "pos_step")
 
     _axis_row("offset_x", t("app.offset_x.label"), -100.0, 100.0, pos_step,
               t("app.offset_x.help"))
@@ -646,57 +619,35 @@ enable_manual_rotations = st.sidebar.checkbox(
     t("app.manual_rotations.label"),
     value=False,
     help=t("app.manual_rotations.help"),
+    key="manual_rotations",
 )
 
 if enable_manual_rotations:
-    rot_options = [ALL_FIGURES] + fig_names if len(fig_names) > 1 else fig_names
-    st.sidebar.selectbox(
-        t("app.select_fig_rotation"),
-        rot_options,
-        format_func=_fig_label,
-        key="selected_rot_fig",
-        on_change=_on_rot_fig_selected,
-    )
-
-    # Schrittweite für Drehung
-    st.sidebar.selectbox(
-        t("app.rot_step.label"),
-        options=[1.0, 5.0, 10.0, 45.0],
-        format_func=lambda x: f"{int(x)}°",
-        index=3,
-        key="rot_step_size",
-        on_change=_on_rot_step_change,
-    )
-    rot_step = float(st.session_state.get("rot_step_size", 45.0))
+    _figure_select(t("app.select_fig_rotation"), "selected_rot_fig")
+    rot_step = _step_select(t("app.rot_step.label"), [1.0, 5.0, 10.0, 45.0], "°", "rot_step")
     max_rot = 360.0 - rot_step
 
     _axis_row("rot_x", t("app.rot_x.label"), 0.0, max_rot, rot_step, t("app.rot_x.help"))
     _axis_row("rot_y", t("app.rot_y.label"), 0.0, max_rot, rot_step, t("app.rot_y.help"))
     _axis_row("rot_z", t("app.rot_z.label"), 0.0, max_rot, rot_step, t("app.rot_z.help"))
 
-offset_x = st.session_state["offset_x"] if enable_manual_offsets else 0.0
-offset_y = st.session_state["offset_y"] if enable_manual_offsets else 0.0
-offset_z = st.session_state["offset_z"] if enable_manual_offsets else 0.0
+# The per-figure values the pipeline really uses - the run, the instant preview
+# and the staleness check all read these, never a slider.
+applied = app_helpers.applied_figure_params(
+    stored, fig_ids, enable_manual_offsets, enable_manual_rotations, enable_finger_recesses
+)
 
 
 def _params_snapshot() -> dict:
-    """Snapshot aller ergebnisrelevanten Eingaben.
+    """Everything a result depends on, for the "settings changed" check.
 
-    Wird beim Generieren im Ergebnis gespeichert und beim Rendern mit den
-    aktuellen Widget-Werten verglichen, um veraltete Ergebnisse zu erkennen.
-    enable_parallel fehlt bewusst - es aendert nur die Laufzeit."""
-    per_fig = {}
-    for name in fig_names:
-        off = st.session_state["fig_offsets_dict"].get(name, {})
-        per_fig[name] = (
-            (off.get("offset_x", 0.0), off.get("offset_y", 0.0), off.get("offset_z", 0.0))
-            if enable_manual_offsets else (0.0, 0.0, 0.0),
-            (off.get("rot_x", 0.0), off.get("rot_y", 0.0), off.get("rot_z", 0.0))
-            if enable_manual_rotations else (0.0, 0.0, 0.0),
-            off.get("finger_recess_position", 0.0) if enable_finger_recesses else 0.0,
-        )
+    Stored with the result and compared on every render. Built from the
+    applied per-figure values: which figure a slider happens to show is not a
+    change (switching the recess selection used to mark the result stale).
+    enable_parallel is left out on purpose - it only changes the runtime.
+    """
     return {
-        "files": [(uf.name, uf.size) for uf in uploaded_files],
+        "files": [(uf.name, content_hashes[uf.file_id]) for uf in uploaded_files],
         "clearance": clearance,
         "wall_thickness": wall_thickness,
         "depth_fraction": depth_fraction,
@@ -706,15 +657,17 @@ def _params_snapshot() -> dict:
         "box": (box_shape, box_width, box_depth, box_height, box_diameter),
         "figure_gap": figure_gap,
         "layout_style": layout_style,
-        "finger": (enable_finger_recesses, finger_radius if enable_finger_recesses else None, finger_recess_axis if enable_finger_recesses else None, finger_recess_z_offset if enable_finger_recesses else None, finger_recess_position if enable_finger_recesses else None),
-        "per_fig": per_fig,
+        "finger": (finger_radius, finger_recess_axis, finger_recess_z_offset)
+        if enable_finger_recesses else None,
+        "per_fig": applied,
     }
 
-# Hauptbereich
+
+# Main area
 col_left, col_right = st.columns([1, 2])
 with col_left:
     st.markdown(t("app.run.heading"))
-    run_btn = st.button(t("app.run.button"), width="stretch")
+    run_btn = st.button(t("app.run.button"), width="stretch", key="run")
     st.markdown(t("app.run.log_heading"))
     status_box = st.empty()
     status_box.info(t("app.run.waiting"))
@@ -729,21 +682,24 @@ with col_right:
 if run_btn:
     tmp_paths: list[str] = []
     try:
-        # Datei-Vorbereitung: mehrere Uploads oder Fallback auf figur.stl
-        fallback_path = "figur.stl"
+        # Input: the uploads, or the default file next to the app
+        fallback_path = inlayer.DEFAULT_INPUT
         input_paths: list[str] = []
         file_names: list[str] = []
+        file_hashes: list[str] = []
 
         if uploaded_files:
             for uf in uploaded_files:
                 with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
-                    tmp.write(uf.getbuffer())
+                    tmp.write(uf.getvalue())
                     tmp_paths.append(tmp.name)
                 input_paths.append(tmp_paths[-1])
-                file_names.append(uf.name)
+                file_names.append(_labels[uf.file_id])
+                file_hashes.append(content_hashes[uf.file_id])
         elif os.path.exists(fallback_path):
             input_paths = [fallback_path]
             file_names = [fallback_path]
+            file_hashes = [_file_hash(fallback_path)]
         else:
             st.error(t("app.error.no_input", path=fallback_path))
             st.stop()
@@ -765,161 +721,116 @@ if run_btn:
             box_depth=box_depth,
             box_height=box_height,
             box_diameter=box_diameter,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            offset_z=offset_z,
             figure_gap=figure_gap,
             layout_style=layout_style,
             enable_finger_recesses=enable_finger_recesses,
             finger_radius=finger_radius,
             finger_recess_axis=finger_recess_axis,
             finger_recess_z_offset=finger_recess_z_offset,
-            finger_recess_position=finger_recess_position,
             enable_parallel=enable_parallel,
         )
 
-        # Gesamtfortschrittsbalken
         progress = st.progress(0, text=t("app.progress.start"))
+        rotations = [a["rotation"] for a in applied]
 
-        # Individuelle manuelle Offsets & Rotationen ermitteln
-        individual_offsets = []
-        individual_rotations = []
-        individual_recess_positions = []
-        for name in file_names:
-            if enable_manual_offsets:
-                off = st.session_state["fig_offsets_dict"].get(name, {})
-                individual_offsets.append((off.get("offset_x", 0.0), off.get("offset_y", 0.0), off.get("offset_z", 0.0)))
-            else:
-                individual_offsets.append((0.0, 0.0, 0.0))
+        # Worker threads need the ScriptRunContext for st.cache_resource; the
+        # language is handed over by _parallel_map itself.
+        _ctx = get_script_run_ctx()
 
-            if enable_manual_rotations:
-                off = st.session_state["fig_offsets_dict"].get(name, {})
-                individual_rotations.append((off.get("rot_x", 0.0), off.get("rot_y", 0.0), off.get("rot_z", 0.0)))
-            else:
-                individual_rotations.append((0.0, 0.0, 0.0))
+        def _attach_ctx():
+            if _ctx is not None:
+                add_script_run_ctx(threading.current_thread(), _ctx)
 
-            off = st.session_state["fig_offsets_dict"].get(name, {})
-            individual_recess_positions.append(
-                float(off.get("finger_recess_position", 0.0)) if enable_finger_recesses else 0.0
-            )
-
-        # Datei-Hashes einmal vorab berechnen (Cache-Keys, je Datei nur ein Read)
-        file_hashes = [_file_hash(p) for p in input_paths]
-
-        # Schritt 1: Alle Figuren vorbereiten und ggf. rotieren (optional parallel)
+        # Step 1: prepare and, if requested, rotate every figure
         label = (t("app.label.figures", n=n_files) if is_multi
                  else t("app.label.figure"))
         progress.progress(0.20, text=t("app.progress.step1", label=label))
         t_step = logger.log(t("app.log.prepare", label=label))
-
-        def _prepare_one(i: int):
-            mesh = _cached_prepare(
-                input_paths[i], file_hashes[i], scale, voxel_pitch, decimate_faces
-            )
-            rx, ry, rz = individual_rotations[i]
-            rotated = mesh
-            if rx != 0.0 or ry != 0.0 or rz != 0.0:
-                rotated = inlayer.apply_euler_rotation(mesh, rx, ry, rz)
-            return mesh, rotated
-
         if enable_parallel and is_multi:
             logger.log(t("app.log.parallel", n=n_files,
                          workers=inlayer._effective_workers(n_files)))
-            prepared_pairs = _parallel_map_app(_prepare_one, list(range(n_files)))
-        else:
-            prepared_pairs = []
-            for i in range(n_files):
-                if is_multi:
-                    logger.log(t("app.log.figure_n", i=i + 1, n=n_files, name=file_names[i]))
-                prepared_pairs.append(_prepare_one(i))
+
+        def _prepare_one(i: int):
+            if is_multi and not enable_parallel:
+                logger.log(t("app.log.figure_n", i=i + 1, n=n_files, name=file_names[i]))
+            mesh = _cached_prepare(
+                input_paths[i], file_hashes[i], scale, voxel_pitch, decimate_faces
+            )
+            rotated = inlayer.apply_euler_rotation(mesh, *rotations[i]) if any(rotations[i]) else mesh
+            return mesh, rotated
+
+        prepared_pairs = inlayer._parallel_map(
+            _prepare_one, range(n_files), config, worker_init=_attach_ctx
+        )
         unrotated_fig_meshes = [pair[0] for pair in prepared_pairs]
         fig_meshes = [pair[1] for pair in prepared_pairs]
 
-        # Schritt 2: Toleranz-Offset pro Figur (optional parallel)
+        # Step 2: tolerance offset per figure
         progress.progress(0.40, text=t("app.progress.step2"))
         t_step = logger.log(t("app.log.dilate"), t_step)
-
-        def _dilate_one(i: int):
-            rx, ry, rz = individual_rotations[i]
-            return _cached_dilate(
+        dilated = inlayer._parallel_map(
+            lambda i: _cached_dilate(
                 fig_meshes[i], file_hashes[i], scale, voxel_pitch, decimate_faces,
-                clearance, rx, ry, rz,
-            )
-
-        if enable_parallel and is_multi:
-            fig_offsets = _parallel_map_app(_dilate_one, list(range(n_files)))
-        else:
-            fig_offsets = [_dilate_one(i) for i in range(n_files)]
-
-        # Schritt 2b: Stabile Anordnung + Box-Bounds (geteilte Logik mit der CLI).
-        # Referenz sind die unrotierten Figuren, damit Slots und Box-Masse bei
-        # Rotationsaenderungen einzelner Figuren stabil bleiben.
-        if is_multi:
-            gap = config.figure_gap if config.figure_gap is not None else config.wall_thickness
-            progress.progress(0.55, text=t("app.progress.step2b", n=n_files))
-            t_step = logger.log(t("app.log.arrange", n=n_files, gap=f"{gap:.1f}",
-                                  style=config.layout_style), t_step)
-        fig_offsets, stable_global_bounds, auto_xy_translations = (
-            inlayer.arrange_with_stable_bounds(
-                unrotated_fig_meshes, fig_meshes, fig_offsets, config
-            )
+                clearance, *rotations[i],
+            ),
+            range(n_files), config, what=t("pipeline.what.dilate"), worker_init=_attach_ctx,
         )
 
-        # xy_translations und z_offsets für Speicherung/Visualisierung setzen (Auto-Anordnung + manueller Offset)
-        xy_translations = [
-            auto_xy_translations[i] + np.array([individual_offsets[i][0], individual_offsets[i][1]])
-            for i in range(n_files)
-        ]
-        z_offsets = [individual_offsets[i][2] for i in range(n_files)]
-
-        # Schritt 3: Inlay konstruieren
+        # Step 3: build_inlay arranges the figures on their real cavities,
+        # builds the box around them and checks every wall. The unrotated
+        # figures only fix the layout order, so neighbours do not swap places
+        # while one of them is being rotated.
         progress.progress(0.70, text=t("app.progress.step3"))
         t_step = logger.log(t("app.log.build"), t_step)
         inlay, actual_w, actual_d, actual_h = inlayer.build_inlay(
-            fig_offsets, config, individual_offsets=individual_offsets,
-            individual_recess_positions=individual_recess_positions,
-            stable_global_bounds=stable_global_bounds,
+            dilated, config,
+            individual_offsets=[a["offset"] for a in applied],
+            individual_recess_positions=[a["recess_position"] for a in applied],
             file_names=file_names,
+            sorting_reference=unrotated_fig_meshes,
         )
 
-        # Berechne die Nullpunkt-Verschiebung fuer die 3D-Vorschau
-        bmin, bmax = stable_global_bounds
-        shift_x = (bmin[0] + bmax[0]) / 2 - actual_w / 2
-        shift_y = (bmin[1] + bmax[1]) / 2 - actual_d / 2
-
-        # Schritt 4: Wandstärkenprüfung
+        # Step 4: wall check (ran inside build_inlay, reported here)
         progress.progress(0.90, text=t("app.progress.step4"))
         t_step = logger.log(t("app.log.wall_check"), t_step)
-        stats_3d = inlayer.wall_thickness_stats_3d(inlay, config)
+        stats_3d = inlayer.wall_thickness_stats_3d(inlay)
 
         progress.progress(1.0, text=t("app.progress.done"))
         logger.log(t("app.progress.done"), t_start)
 
-        # --- Ergebnisse im session_state speichern ---
         stl_io = io.BytesIO()
         inlay.export(file_obj=stl_io, file_type="stl")
-        stl_data = stl_io.getvalue()
 
+        # Only what the result view reads, as geometry-only copies: the full
+        # inlay (and before that the dilated figures) sat in every session's
+        # state although the view needs a decimated mesh and a few numbers.
         st.session_state["result"] = {
             "params": _params_snapshot(),
-            "result_token": hashlib.sha256(stl_data).hexdigest()[:16],
             "stats_3d": stats_3d,
             "box_shape": box_shape,
             "actual_w": actual_w,
             "actual_d": actual_d,
             "actual_h": actual_h,
-            "stl_bytes": stl_data,
+            "stl_bytes": stl_io.getvalue(),
+            "n_faces": len(inlay.faces),
             "wall_thickness": wall_thickness,
-            "depth_fraction": depth_fraction,
-            "inlay": inlay,
+            "inlay_viz": app_helpers.preview_copy(inlay, INLAY_PREVIEW_FACES),
+            "placements": inlay.metadata["placements"],
+            "recesses": [
+                app_helpers.preview_copy(r, INLAY_PREVIEW_FACES)
+                for r in inlay.metadata.get("finger_recesses", [])
+            ],
             "fig_meshes": fig_meshes,
-            "fig_offsets": fig_offsets,
+            # Everything that determines a prepared, rotated figure. The inlay's
+            # hash does not: two figures on the same round base cut the same
+            # inlay, and the preview then drew the other session's figure.
+            "fig_cache_keys": [
+                f"{file_hashes[i]}:{scale}:{voxel_pitch}:{decimate_faces}:"
+                + ":".join(str(r) for r in rotations[i])
+                for i in range(n_files)
+            ],
             "file_names": file_names,
             "is_multi": is_multi,
-            "xy_translations": xy_translations,
-            "z_offsets": z_offsets,
-            "shift_x": float(shift_x),
-            "shift_y": float(shift_y),
         }
 
     except Exception as e:
@@ -934,7 +845,7 @@ if run_btn:
                 pass
 
 
-# --- Dashboard & Vorschau (aus session_state, überlebt Reruns) --------------
+# --- Dashboard & preview (from session_state, survives reruns) --------------
 if "result" in st.session_state:
     res = st.session_state["result"]
     stats_3d = res["stats_3d"]
@@ -943,17 +854,9 @@ if "result" in st.session_state:
     actual_h = res["actual_h"]
     stl_bytes = res["stl_bytes"]
     _wt = res["wall_thickness"]
-    inlay = res["inlay"]
     fig_meshes = res["fig_meshes"]
-    fig_offsets = res["fig_offsets"]
     _file_names = res["file_names"]
     _is_multi = res["is_multi"]
-    _df = res["depth_fraction"]
-    xy_trans = res.get("xy_translations", [np.array([0.0, 0.0])] * len(fig_meshes))
-    z_offs = res.get("z_offsets", [0.0] * len(fig_meshes))
-    _sx = res.get("shift_x", 0.0)
-    _sy = res.get("shift_y", 0.0)
-    _token = res.get("result_token", "")
 
     with col_left:
         st.markdown(t("app.results.heading"))
@@ -969,20 +872,10 @@ if "result" in st.session_state:
                 f'<div class="warning-badge">{t("app.results.wall_thin")}</div>',
                 unsafe_allow_html=True,
             )
-            # Ermittle betroffene Dateinamen aus den Metadaten des Inlays
-            violating_names = []
-            violating_indices = inlay.metadata.get("violating_indices", []) if hasattr(inlay, "metadata") else []
-            for idx in violating_indices:
-                if idx < len(_file_names):
-                    violating_names.append(_file_names[idx])
-            
-            affected_text = ""
-            if violating_names:
-                affected_text = t("app.results.affected", names=", ".join(violating_names))
-            
-            st.warning(t("app.results.wall_warning", wall=_wt,
-                          measured=f"{stats_3d['min_wall_mm']:.2f}",
-                          affected=affected_text))
+            findings = "\n".join(
+                "- " + inlayer.describe_violation(v, _file_names) for v in stats_3d["violations"]
+            )
+            st.warning(t("app.results.wall_warning", wall=_wt, findings=findings))
         st.write("")
 
         m_col1, m_col2 = st.columns(2)
@@ -994,11 +887,10 @@ if "result" in st.session_state:
                 </div>""",
                 unsafe_allow_html=True,
             )
-            _n_faces = f"{len(inlay.faces):,}".replace(",", ".")
             st.markdown(
                 f"""<div class="metric-card">
                     <div class="metric-label">{t("app.metric.triangles")}</div>
-                    <div class="metric-value">{_n_faces}</div>
+                    <div class="metric-value">{i18n.format_int(res["n_faces"])}</div>
                 </div>""",
                 unsafe_allow_html=True,
             )
@@ -1036,39 +928,26 @@ if "result" in st.session_state:
             file_name=_dl_name,
             mime="application/octet-stream",
             width="stretch",
+            key="download",
         )
 
-    # --- 3D Visualisierung -------------------------------------------------
+    # --- 3D view ------------------------------------------------------------
     with col_right:
         plot_box.empty()
-
-        viz_inlay = _decimated_for_viz(inlay, f"{_token}:inlay", 30000)
-
         fig_3d = go.Figure()
-
-        # Inlay-Trace
         fig_3d.add_trace(_mesh3d(
-            viz_inlay, color="#1f77b4", opacity=0.8,
+            res["inlay_viz"], color="#1f77b4", opacity=0.8,
             name=t("app.trace.inlay"), showlegend=True,
         ))
 
-        # Figuren-Traces: jede Figur in eigener Farbe
+        # One colour per figure
         max_fig_faces = 15000 if not _is_multi else 10000
-
-        # Exakt die Z-Ausdehnung, mit der build_inlay die Figuren platziert hat.
-        # Nicht nachrechnen: die Bounds enthalten einen Inflations-Ausgleich,
-        # ohne den die Vorschau die Figuren zu tief in der Box zeichnet.
-        max_z_extent = float(inlay.metadata["max_z_extent"])
-
-        for i, (fig_m, fig_ot) in enumerate(zip(fig_meshes, fig_offsets)):
-            # Dezimierung (gecacht) vor der Translation – beides ist reihenfolgeunabhaengig
-            viz_fig = _decimated_for_viz(fig_m, f"{_token}:fig{i}", max_fig_faces).copy()
-            bmin_ot_z = float(fig_ot.bounds[0][2])
-            trans_x = xy_trans[i][0] - _sx
-            trans_y = xy_trans[i][1] - _sy
-            fig_h = float(fig_ot.bounds[1][2] - fig_ot.bounds[0][2])
-            z_pos_bottom = actual_h + (1 - _df) * max_z_extent - fig_h
-            viz_fig.apply_translation([trans_x, trans_y, z_pos_bottom - bmin_ot_z + z_offs[i]])
+        # Exactly the translation build_inlay applied to each figure. The
+        # prepared figure shares its frame with the dilated one it was given,
+        # so the same translation puts it inside its cavity.
+        for i, fig_m in enumerate(fig_meshes):
+            viz_fig = _decimated_for_viz(fig_m, res["fig_cache_keys"][i], max_fig_faces).copy()
+            viz_fig.apply_translation(res["placements"][i])
 
             color = _fig_colors[i % len(_fig_colors)]
             label = (_file_names[i] if i < len(_file_names)
@@ -1080,47 +959,41 @@ if "result" in st.session_state:
                 viz_fig, color=color, opacity=0.6, name=label, showlegend=True,
             ))
 
-        # Fingermulden-Traces visualisieren, falls vorhanden
-        recesses = inlay.metadata.get("finger_recesses", []) if hasattr(inlay, "metadata") else []
-        if recesses:
-            for r_idx, cyl in enumerate(recesses):
-                # Dezimierung gecacht, damit sie bei reinen Reruns nicht erneut laeuft
-                viz_cyl = _decimated_for_viz(cyl, f"{_token}:recess{r_idx}", 5000)
-
-                fig_3d.add_trace(_mesh3d(
-                    viz_cyl, color="#f1c40f", opacity=0.3,
-                    name=t("app.trace.recesses"), showlegend=(r_idx == 0),
-                ))
+        for r_idx, recess in enumerate(res["recesses"]):
+            fig_3d.add_trace(_mesh3d(
+                recess, color="#f1c40f", opacity=0.3,
+                name=t("app.trace.recesses"), showlegend=(r_idx == 0),
+            ))
 
         fig_3d.update_layout(**_scene_layout(650))
         st.plotly_chart(fig_3d, width="stretch")
         st.info(t("app.viewer.hint"))
 
 elif uploaded_files:
-    # --- Sofort-Vorschau: Figuren direkt nach dem Upload anzeigen ------------
-    # Zeigt die (dezimierten) Original-Meshes nebeneinander, inkl. der aktuell
-    # eingestellten Rotationen – ohne die teure Pipeline zu starten.
+    # --- Instant preview: the figures right after the upload -----------------
+    # Shows the (decimated) original meshes side by side, with the rotations
+    # currently set - without running the expensive pipeline.
     with col_right:
         prev_fig = go.Figure()
         cur_x = 0.0
         for i, uf in enumerate(uploaded_files):
-            mesh = _preview_mesh(bytes(uf.getbuffer()), f"{uf.name}:{uf.size}", scale)
-            rot = st.session_state["fig_offsets_dict"].get(uf.name, {})
-            rx = rot.get("rot_x", 0.0) if enable_manual_rotations else 0.0
-            ry = rot.get("rot_y", 0.0) if enable_manual_rotations else 0.0
-            rz = rot.get("rot_z", 0.0) if enable_manual_rotations else 0.0
-            # apply_euler_rotation liefert immer eine Kopie – wichtig, weil
-            # _preview_mesh ein gecachtes Objekt zurueckgibt
-            mesh = inlayer.apply_euler_rotation(mesh, rx, ry, rz)
+            # One broken file must not take the preview of the others with it.
+            try:
+                mesh = _preview_mesh(uf.getvalue(), content_hashes[uf.file_id], scale, uf.name)
+            except ValueError as exc:
+                st.warning(str(exc))
+                continue
+            # apply_euler_rotation always returns a copy - important, because
+            # _preview_mesh hands out a cached object
+            mesh = inlayer.apply_euler_rotation(mesh, *applied[i]["rotation"])
             mesh.apply_translation(
                 [cur_x - mesh.bounds[0][0], -mesh.bounds[0][1], -mesh.bounds[0][2]]
             )
             cur_x += mesh.extents[0] + 10.0
             prev_fig.add_trace(_mesh3d(
                 mesh, color=_fig_colors[i % len(_fig_colors)], opacity=0.9,
-                name=uf.name, showlegend=True,
+                name=_labels[uf.file_id], showlegend=True,
             ))
         prev_fig.update_layout(**_scene_layout(650))
         plot_box.plotly_chart(prev_fig, width="stretch")
         st.caption(t("app.preview.caption"))
-
