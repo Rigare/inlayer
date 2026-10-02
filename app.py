@@ -534,10 +534,13 @@ if multi_mode:
         st.session_state.setdefault(_key, float(st.session_state["figure_gap"]))
 
     # One caption for slider and number field (both label_visibility="collapsed").
-    # No fixed colour: the text has to follow the theme's text colour.
+    # No fixed colour: the text has to follow the theme's text colour. The help
+    # sits on the caption: Streamlit drops a widget's tooltip together with a
+    # collapsed label, so on the slider it was never shown.
     st.sidebar.markdown(
         f'<span style="font-size:0.9rem;">{t("app.gap.label")}</span>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
+        help=t("app.gap.help"),
     )
     _g1, _g2 = st.sidebar.columns([3, 1])
     with _g1:
@@ -548,7 +551,6 @@ if multi_mode:
             key="_sl_figure_gap",
             on_change=_sync_gap, args=("_sl_figure_gap",),
             label_visibility="collapsed",
-            help=t("app.gap.help")
         )
     with _g2:
         st.number_input(

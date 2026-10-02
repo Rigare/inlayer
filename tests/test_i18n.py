@@ -245,6 +245,13 @@ class TestTranslatedBehaviour:
         i18n.set_language(lang)
         assert i18n.format_int(12345678) == expected
 
+    def test_pipeline_counts_use_the_language_separator(self, capsys, cube_stl_path):
+        """The triangle counts in the pipeline log used to keep the English
+        separator in every language."""
+        i18n.set_language("de")
+        inlayer.prepare_figure(cube_stl_path, Config(voxel_pitch=1.0, decimate_faces=20000))
+        out = capsys.readouterr().out
+        assert "20.000" in out and "20,000" not in out
 
 
 class TestThreadPropagation:

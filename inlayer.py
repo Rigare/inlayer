@@ -431,7 +431,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     m = load_mesh(path, name=path)
     if config.stl_unit_to_mm != 1.0:
         m.apply_scale(config.stl_unit_to_mm)
-    _log(t_("pipeline.loaded", faces=f"{len(m.faces):,}", extents=m.extents.round(2)), t)
+    _log(t_("pipeline.loaded", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
     _check_grid_size(m.extents, config.voxel_pitch / 2, name=path)
 
     # Repair only when there is something to repair. pymeshfix is the most
@@ -443,7 +443,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     # hits the interior instead of running outwards.
     t = _log(t_("pipeline.repair"))
     if m.is_watertight and m.is_winding_consistent:
-        _log(t_("pipeline.repair_skipped", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.repair_skipped", faces=i18n.format_int(len(m.faces))), t)
     else:
         mf = pymeshfix.MeshFix(m.vertices, m.faces)
         # pymeshfix's default removes every shell but the one with the most
@@ -452,15 +452,15 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         # part survived depended on an unrelated hole anywhere in the file.
         mf.repair(remove_smallest_components=False)
         m = trimesh.Trimesh(vertices=mf.points, faces=mf.faces)
-        _log(t_("pipeline.repaired", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.repaired", faces=i18n.format_int(len(m.faces))), t)
 
-    t = _log(t_("pipeline.decimate", target=f"{config.decimate_faces:,}"))
+    t = _log(t_("pipeline.decimate", target=i18n.format_int(config.decimate_faces)))
     current_faces = len(m.faces)
     if current_faces > config.decimate_faces:
         m = decimate_mesh(m, config.decimate_faces)
-        _log(t_("pipeline.decimated", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.decimated", faces=i18n.format_int(len(m.faces))), t)
     else:
-        _log(t_("pipeline.decimate_skipped", faces=f"{current_faces:,}"), t)
+        _log(t_("pipeline.decimate_skipped", faces=i18n.format_int(current_faces)), t)
 
     t = _log(t_("pipeline.voxelize_closing"))
     vox = _voxelize_surface(m, config.voxel_pitch)
@@ -474,7 +474,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     closed = binary_closing(padded, iterations=iters)
 
     m = _grid_to_mesh(closed, _padded_transform(vox.transform, iters))
-    _log(t_("pipeline.result", faces=f"{len(m.faces):,}", extents=m.extents.round(2)), t)
+    _log(t_("pipeline.result", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
 
     return m
 
@@ -554,7 +554,8 @@ def dilate(
     # iters=0 leaves the transform unchanged, so one call serves both cases.
     result = _grid_to_mesh(dilated, _padded_transform(vox.transform, iters))
     _log(
-        t_("pipeline.result", faces=f"{len(result.faces):,}", extents=result.extents.round(2)), t
+        t_("pipeline.result", faces=i18n.format_int(len(result.faces)),
+           extents=result.extents.round(2)), t
     )
     return result
 
@@ -893,7 +894,7 @@ def build_inlay(
         # The Z offset is applied afterwards; fill far enough that the cavity
         # still reaches past the top face once it has moved.
         solid = _solidify_figure(local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2])
-        _log(t_("pipeline.solidified", faces=f"{len(solid.faces):,}"), t)
+        _log(t_("pipeline.solidified", faces=i18n.format_int(len(solid.faces))), t)
         return solid
 
     solids = _parallel_map(
@@ -987,7 +988,7 @@ def build_inlay(
         raise RuntimeError(t_("error.csg_failed")) from exc
     if len(inlay.faces) == 0:
         raise ValueError(t_("error.csg_empty"))
-    _log(t_("pipeline.csg_result", faces=f"{len(inlay.faces):,}"), t)
+    _log(t_("pipeline.csg_result", faces=i18n.format_int(len(inlay.faces))), t)
 
     wall_check = _wall_check(box_m, cutters, inlay_m, config, apothem)
 

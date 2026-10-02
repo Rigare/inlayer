@@ -369,6 +369,13 @@ class TestGapFollowsWallThickness:
         assert _widget(at, "slider", "_sl_figure_gap").value == 3.5
         assert at.session_state["figure_gap"] == 3.5
 
+    def test_help_sits_on_the_visible_caption(self):
+        """Streamlit drops a tooltip together with a collapsed label: on the
+        slider the help text was never shown."""
+        at = _two_figures()
+        label = i18n.TRANSLATIONS["app.gap.label"]["en"]
+        caption = next(m for m in at.sidebar.markdown if label in m.value)
+        assert caption.proto.help == i18n.TRANSLATIONS["app.gap.help"]["en"]
 
 
 def test_widgets_start_with_the_pipeline_defaults():
