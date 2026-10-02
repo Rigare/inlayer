@@ -1,8 +1,9 @@
-"""Tests fuer den Euler-Rotations-Helper aus inlayer.py."""
+"""Tests for the Euler rotation helper in inlayer.py."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import trimesh
 
 import inlayer
@@ -33,16 +34,24 @@ class TestApplyEulerRotation:
         rotated = inlayer.apply_euler_rotation(cube_mesh, 30.0, 45.0, 60.0)
         assert np.isclose(rotated.volume, cube_mesh.volume, rtol=1e-6)
 
-    def test_reihenfolge_rz_ry_rx(self):
-        """Verifiziert die dokumentierte Reihenfolge Rz·Ry·Rx gegen eine
-        manuelle Referenzberechnung."""
-        box = trimesh.creation.box(extents=[6.0, 4.0, 2.0])
-        result = inlayer.apply_euler_rotation(box, 15.0, 25.0, 35.0)
+    @pytest.mark.parametrize(
+        "angles, images",
+        [
+            # Right-handed: +90° about Z turns X into Y
+            ((0.0, 0.0, 90.0), [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]),
+            # X before Y, Y before Z, X before Z - the reverse order of each
+            # pair sends the unit vectors elsewhere
+            ((90.0, 90.0, 0.0), [[0, 0, -1], [1, 0, 0], [0, -1, 0]]),
+            ((0.0, 90.0, 90.0), [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]),
+            ((90.0, 0.0, 90.0), [[0, 1, 0], [0, 0, 1], [1, 0, 0]]),
+        ],
+    )
+    def test_order_and_direction(self, angles, images):
+        """X first, then Y, then Z (Rz·Ry·Rx), each counter-clockwise.
 
-        ref = box.copy()
-        Rx = trimesh.transformations.rotation_matrix(np.radians(15.0), [1, 0, 0])
-        Ry = trimesh.transformations.rotation_matrix(np.radians(25.0), [0, 1, 0])
-        Rz = trimesh.transformations.rotation_matrix(np.radians(35.0), [0, 0, 1])
-        ref.apply_transform(trimesh.transformations.concatenate_matrices(Rz, Ry, Rx))
-
-        assert np.allclose(result.vertices, ref.vertices, atol=1e-9)
+        Pinned by where the unit vectors land rather than by rebuilding the
+        matrices: a reference built like the implementation shares its mistakes.
+        """
+        axes = trimesh.Trimesh(vertices=np.eye(3), faces=[[0, 1, 2]], process=False)
+        rotated = inlayer.apply_euler_rotation(axes, *angles)
+        np.testing.assert_allclose(rotated.vertices, images, atol=1e-12)

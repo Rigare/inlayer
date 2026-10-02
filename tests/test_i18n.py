@@ -22,17 +22,13 @@ from inlayer import Config
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_FILES = ("app.py", "inlayer.py", "app_helpers.py")
 
-# Keys, die im Code nur dynamisch zusammengesetzt werden (f-Strings wie
-# t(f"app.layout.{x}")). Der AST-Scan kann sie nicht aufloesen, deshalb stehen
-# sie hier explizit und werden ebenso auf Existenz geprueft.
+# Keys the code only assembles at runtime (f-strings such as
+# t(f"app.layout.{x}")). The AST scan cannot resolve them, so they are listed
+# here and checked for existence just the same.
 DYNAMIC_KEYS = (
-    "app.box.shape.box",
-    "app.box.shape.cylinder",
     "app.layout.compact",
     "app.layout.horizontal",
     "app.layout.vertical",
-    "app.finger.axis.x",
-    "app.finger.axis.y",
     # inlayer.describe_violation: t_(f"check.{kind}")
     "check.side",
     "check.floor",
@@ -153,6 +149,9 @@ class TestNormalize:
             ("de-AT", "de"),
             ("en_US.UTF-8", "en"),
             ("de_DE.UTF-8", "de"),
+            # No territory: only the split at "." strips the encoding
+            ("de.UTF-8", "de"),
+            ("de.utf8", "de"),
             ("fr", i18n.DEFAULT_LANGUAGE),
             ("klingon", i18n.DEFAULT_LANGUAGE),
             ("", i18n.DEFAULT_LANGUAGE),
@@ -239,6 +238,13 @@ class TestTranslatedBehaviour:
         i18n.set_language(lang)
         inlayer._parallel_map(lambda x: x, range(4), Config(enable_parallel=True), what="X")
         assert needle in capsys.readouterr().out
+
+    @pytest.mark.parametrize("lang,expected", [("en", "12,345,678"), ("de", "12.345.678")])
+    def test_thousands_separator_follows_language(self, lang, expected):
+        """German reads "12,345" as a decimal number."""
+        i18n.set_language(lang)
+        assert i18n.format_int(12345678) == expected
+
 
 
 class TestThreadPropagation:

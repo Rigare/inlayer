@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
+from typing import Any
 
 import numpy as np
 import pytest
@@ -136,36 +136,23 @@ class TestBuildInlayOffsets:
 
 
 class TestBuildInlaySignature:
-    """Absicherung gegen wiederkehrende tote Parameter.
+    """Guards against dead parameters coming back.
 
-    `individual_rotations` war frueher Teil der Signatur, wurde aber nie
-    ausgewertet (Rotationen sind zum Aufrufzeitpunkt bereits in den Meshes
-    eingerechnet). Der Parameter ist entfernt; dieser Test haelt das fest.
+    `individual_rotations` was part of the signature but never evaluated
+    (rotations are already baked into the meshes at call time). Box sizing
+    used to be split between the caller (`stable_global_bounds`) and
+    build_inlay; the documented call without them got neither the XY
+    compensation nor room for the finger recesses. Both are gone, and a caller
+    still passing them has to fail instead of being silently ignored. Calling
+    is what pins that - a signature check misses a `**kwargs` swallowing them.
     """
 
-    def test_no_individual_rotations_parameter(self):
-        params = inspect.signature(inlayer.build_inlay).parameters
-        assert "individual_rotations" not in params
-
-    def test_no_stable_global_bounds_parameter(self):
-        """build_inlay dimensions the box itself, from the real cavities.
-
-        Box sizing used to be split between the caller (stable bounds) and
-        build_inlay; the documented call without them got neither the XY
-        compensation nor room for the finger recesses.
-        """
-        params = inspect.signature(inlayer.build_inlay).parameters
-        assert "stable_global_bounds" not in params
-
-    def test_rejects_individual_rotations_keyword(self, dilated_cube, fast_test_config):
-        # Ein Aufrufer, der den alten Parameter uebergibt, soll scheitern statt
-        # stillschweigend eine wirkungslose Rotation zu "akzeptieren".
-        with pytest.raises(TypeError):
-            inlayer.build_inlay(
-                dilated_cube, fast_test_config,
-                # Der Parameter ist bewusst weg – der Typfehler ist hier der Test.
-                individual_rotations=[(90.0, 45.0, 30.0)],  # type: ignore[unexpected-keyword]
-            )
+    @pytest.mark.parametrize("keyword", ["individual_rotations", "stable_global_bounds"])
+    def test_removed_keyword_is_rejected(self, keyword):
+        # Arguments are bound before the body runs, so no figure is needed
+        removed: dict[str, Any] = {keyword: None}
+        with pytest.raises(TypeError, match=keyword):
+            inlayer.build_inlay([], **removed)
 
 
 class TestBuildInlayMultiMesh:
@@ -629,12 +616,3 @@ class TestBuildInlayIndividualRecessPositions:
             inlayer.build_inlay(
                 dilated_cube, Config(**self.CFG), individual_recess_positions=[1.5]
             )
-
-    def test_accepts_the_keyword(self):
-        """The parameter is part of the public signature."""
-        params = inspect.signature(inlayer.build_inlay).parameters
-        assert "individual_recess_positions" in params
-
-
-
-

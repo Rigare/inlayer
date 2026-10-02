@@ -20,18 +20,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestEffectiveWorkers:
-    """_effective_workers begrenzt die Thread-Anzahl nach unten und oben."""
+    """_effective_workers caps the thread count by items, cores and memory.
 
-    def test_mindestens_ein_worker(self):
-        assert inlayer._effective_workers(0) == 1
-        assert inlayer._effective_workers(1) == 1
+    The core count is pinned in every test: the CI runner has 4 cores - as
+    many as MAX_PARALLEL_WORKERS - so with the real count a missing RAM cap
+    went unnoticed there (min(100, 4) is 4 either way).
+    """
 
-    def test_nicht_mehr_worker_als_items(self):
-        assert inlayer._effective_workers(2) <= 2
+    @staticmethod
+    def _cores(monkeypatch, n):
+        monkeypatch.setattr(inlayer.os, "cpu_count", lambda: n)
 
-    def test_ram_cap_greift(self):
-        # Voxelgitter skalieren O(n³) im Speicher → harte Obergrenze
-        assert inlayer._effective_workers(100) <= inlayer.MAX_PARALLEL_WORKERS
+    def test_ram_cap_holds_on_a_large_machine(self, monkeypatch):
+        # Voxel grids grow O(n³) in memory, so the cap is hard
+        self._cores(monkeypatch, 64)
+        assert inlayer._effective_workers(100) == inlayer.MAX_PARALLEL_WORKERS
+
+    def test_no_more_workers_than_items(self, monkeypatch):
+        self._cores(monkeypatch, 64)
+        assert inlayer._effective_workers(2) == 2
+
+    def test_no_more_workers_than_cores(self, monkeypatch):
+        self._cores(monkeypatch, 2)
+        assert inlayer._effective_workers(8) == 2
+        self._cores(monkeypatch, None)  # os.cpu_count() cannot always tell
+        assert inlayer._effective_workers(8) == 1
 
 
 class TestParallelMap:

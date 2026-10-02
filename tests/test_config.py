@@ -1,4 +1,9 @@
-"""Tests fuer die Config-Dataclass (Default-Werte und Validierung)."""
+"""Tests for the Config dataclass: value validation and its messages.
+
+The default values themselves are not pinned here - a changed default is a
+deliberate edit. What can drift is a second copy of them, which is why
+tests/test_app_render.py checks that the web app starts with these values.
+"""
 
 from __future__ import annotations
 
@@ -8,47 +13,6 @@ from dataclasses import fields
 import pytest
 
 from inlayer import Config
-
-
-class TestConfigDefaults:
-    """Default-Werte der Pipeline-Parameter."""
-
-    def test_default_clearance(self):
-        assert Config().clearance == 0.4
-
-    def test_default_wall_thickness(self):
-        assert Config().wall_thickness == 2.0
-
-    def test_default_depth_fraction(self):
-        assert Config().depth_fraction == 0.7
-
-    def test_default_voxel_pitch(self):
-        assert Config().voxel_pitch == 0.4
-
-    def test_default_decimate_faces(self):
-        assert Config().decimate_faces == 20000
-
-    def test_default_stl_unit(self):
-        assert Config().stl_unit_to_mm == 1.0
-
-    def test_box_overrides_default_none(self):
-        c = Config()
-        assert c.box_width is None
-        assert c.box_depth is None
-        assert c.box_height is None
-
-    def test_offsets_default_zero(self):
-        c = Config()
-        assert c.offset_x == 0.0
-        assert c.offset_y == 0.0
-        assert c.offset_z == 0.0
-
-    def test_layout_style_default_compact(self):
-        assert Config().layout_style == "compact"
-
-    def test_enable_parallel_default_false(self):
-        # Multi-Threading ist opt-in (Speicherbedarf steigt mit Worker-Anzahl)
-        assert Config().enable_parallel is False
 
 
 class TestConfigValidation:
