@@ -62,12 +62,11 @@ def _non_negative(value: float) -> bool:
 # each rule has exactly one message: "-c -0.5" used to say "must be > 0"
 # although 0 is allowed.
 _RANGE_RULES: Final = (
-    (_positive, ("wall_thickness", "voxel_pitch", "stl_unit_to_mm", "finger_radius",
-                 "box_width", "box_depth", "box_height", "box_diameter", "figure_gap")),
-    (_non_negative, ("clearance", "finger_recess_z_offset")),
+    (_positive, "config.must_be_positive",
+     ("wall_thickness", "voxel_pitch", "stl_unit_to_mm", "finger_radius",
+      "box_width", "box_depth", "box_height", "box_diameter", "figure_gap")),
+    (_non_negative, "config.must_be_non_negative", ("clearance", "finger_recess_z_offset")),
 )
-_RANGE_MESSAGES: Final = {_positive: "config.must_be_positive",
-                          _non_negative: "config.must_be_non_negative"}
 
 
 @dataclass(frozen=True)
@@ -112,11 +111,11 @@ class Config:
             value = getattr(self, field.name)
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(t_("config.must_be_finite", name=field.name, value=value))
-        for rule, names in _RANGE_RULES:
+        for rule, message, names in _RANGE_RULES:
             for name in names:
                 value = getattr(self, name)
                 if value is not None and not rule(value):
-                    raise ValueError(t_(_RANGE_MESSAGES[rule], name=name, value=value))
+                    raise ValueError(t_(message, name=name, value=value))
         if not 0.0 < self.depth_fraction <= 1.0:
             raise ValueError(t_("config.must_be_fraction", name="depth_fraction",
                                 value=self.depth_fraction))
@@ -304,19 +303,16 @@ def _grid_to_mesh(matrix: np.ndarray, transform: np.ndarray) -> trimesh.Trimesh:
 def apply_euler_rotation(
     mesh: trimesh.Trimesh, rot_x: float, rot_y: float, rot_z: float
 ) -> trimesh.Trimesh:
-    """Dreht eine Kopie des Meshes um die XYZ-Achsen (Winkel in Grad).
+    """Rotates a copy of the mesh about the X, Y and Z axes (angles in degrees).
 
-    Reihenfolge der Anwendung: erst X, dann Y, dann Z (Rz·Ry·Rx). Gibt das
-    Mesh bei Nullrotation unveraendert (als Kopie) zurueck.
+    Applied in that order - first X, then Y, then Z (Rz·Ry·Rx), each about
+    the fixed world axes ("sxyz"). Without rotation the copy is unchanged:
+    apply_transform skips an identity matrix.
     """
-    if rot_x == 0.0 and rot_y == 0.0 and rot_z == 0.0:
-        return mesh.copy()
     m = mesh.copy()
-    Rx = trimesh.transformations.rotation_matrix(np.radians(rot_x), [1, 0, 0])
-    Ry = trimesh.transformations.rotation_matrix(np.radians(rot_y), [0, 1, 0])
-    Rz = trimesh.transformations.rotation_matrix(np.radians(rot_z), [0, 0, 1])
-    R = trimesh.transformations.concatenate_matrices(Rz, Ry, Rx)
-    m.apply_transform(R)
+    m.apply_transform(trimesh.transformations.euler_matrix(
+        *np.radians([rot_x, rot_y, rot_z]), axes="sxyz"
+    ))
     return m
 
 
@@ -633,11 +629,6 @@ def arrange_footprints(
     return positions
 
 
-def _is_manifold(m: trimesh.Trimesh) -> bool:
-    """True for a watertight mesh with at least one face."""
-    return m.is_watertight and len(m.faces) > 0
-
-
 def _to_manifold(mesh: trimesh.Trimesh) -> Manifold:
     """Same conversion trimesh.boolean uses for engine='manifold'."""
     return Manifold(Mesh(
@@ -909,7 +900,7 @@ def build_inlay(
         solidify_logged, range(n), config, what=t_("pipeline.what.solidify")
     )
     for label, solid in zip(labels, solids):
-        if not _is_manifold(solid):
+        if not (solid.is_watertight and len(solid.faces) > 0):
             raise ValueError(t_("error.not_manifold", label=label))
 
     recesses: list[list[trimesh.Trimesh]] = [[] for _ in range(n)]
