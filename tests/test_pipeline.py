@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 import trimesh
 
 import inlayer
-from inlayer import Config
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

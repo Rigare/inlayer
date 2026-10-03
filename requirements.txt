@@ -27,7 +27,8 @@ trimesh==4.12.2
 # Voxel-Schritt fehl. Deshalb explizit hier.
 scikit-image==0.26.0
 
-# CSG-Engine: build_inlay ruft trimesh.boolean.* mit engine='manifold' auf.
+# CSG engine: build_inlay calls manifold3d directly - for the boolean cut and
+# for the wall check, which needs the Manifold objects.
 manifold3d==3.5.2
 
 # Mesh-Reparatur bzw. Dezimierung in prepare_figure.

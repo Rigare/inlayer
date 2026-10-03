@@ -5,9 +5,8 @@ __pycache__
 *.pyc
 data
 *.md
+.dockerignore
 # Dockerfile stays IN the context on purpose: tests/test_streamlit_config.py
 # reads it to check that the runtime stage copies .streamlit/, so the test
 # stage has to copy it in. No stage does `COPY . .`, so it only ever lands
 # where it is named explicitly - never in the runtime image.
-docker-compose.yml
-.dockerignore

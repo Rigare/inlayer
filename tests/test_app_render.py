@@ -21,6 +21,7 @@ import trimesh
 from streamlit.testing.v1 import AppTest
 
 import i18n
+import inlayer
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -114,6 +115,21 @@ class TestRotationStepSurvivesHiding:
         assert next(s for s in at.sidebar.selectbox if s.key == "_w_rot_step").value == 10.0
         assert next(s for s in at.sidebar.slider if s.key == "_sl_rot_x").value == 350.0
         assert at.button, "the run button must still render"
+
+    def test_a_coarser_step_snaps_the_shown_value(self):
+        """Slider, number field and the stored value snap to the new step
+        together. A new step makes Streamlit rebuild the widgets, so a value
+        that is not set before they exist falls back to the slider's minimum -
+        hence 100° -> 90°, not a value that lands on 0°."""
+        at = _run("en")
+        _checkbox(at, "app.manual_rotations.label").check().run()
+        _widget(at, "selectbox", "_w_rot_step").set_value(10.0).run()
+        _widget(at, "slider", "_sl_rot_x").set_value(100.0).run()
+        _widget(at, "selectbox", "_w_rot_step").set_value(45.0).run()
+        assert not at.exception, [str(e.value) for e in at.exception]
+        assert _widget(at, "slider", "_sl_rot_x").value == 90.0
+        assert _widget(at, "number_input", "_ni_rot_x").value == 90.0
+        assert at.session_state["fig_offsets_dict"]["__fallback__"]["rot_x"] == 90.0
 
 
 @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
@@ -345,6 +361,46 @@ class TestGapFollowsWallThickness:
         _widget(at, "slider", "wall_thickness").set_value(5.0).run()
         assert _widget(at, "slider", "_sl_figure_gap").value == 3.0
         assert at.session_state["figure_gap"] == 3.0
+
+    def test_the_number_field_sets_it_too(self):
+        at = _two_figures()
+        _widget(at, "number_input", "_ni_figure_gap").set_value(3.5).run()
+        _widget(at, "slider", "wall_thickness").set_value(5.0).run()
+        assert _widget(at, "slider", "_sl_figure_gap").value == 3.5
+        assert at.session_state["figure_gap"] == 3.5
+
+    def test_help_sits_on_the_visible_caption(self):
+        """Streamlit drops a tooltip together with a collapsed label: on the
+        slider the help text was never shown."""
+        at = _two_figures()
+        label = i18n.TRANSLATIONS["app.gap.label"]["en"]
+        caption = next(m for m in at.sidebar.markdown if label in m.value)
+        assert caption.proto.help == i18n.TRANSLATIONS["app.gap.help"]["en"]
+
+
+def test_widgets_start_with_the_pipeline_defaults():
+    """Web app and CLI start from the same values, Config's defaults. The app
+    used to repeat them as literals that nothing kept in sync."""
+    cfg = inlayer.Config()
+    at = _two_figures()
+    assert _widget(at, "checkbox", "finger_enabled").value == cfg.enable_finger_recesses
+    assert _widget(at, "checkbox", "parallel").value == cfg.enable_parallel
+    _widget(at, "checkbox", "finger_enabled").check().run()
+    for kind, key, field in [
+        ("slider", "clearance", "clearance"),
+        ("slider", "wall_thickness", "wall_thickness"),
+        ("slider", "depth_fraction", "depth_fraction"),
+        ("slider", "voxel_pitch", "voxel_pitch"),
+        ("number_input", "decimate_faces", "decimate_faces"),
+        ("number_input", "scale", "stl_unit_to_mm"),
+        ("slider", "finger_radius", "finger_radius"),
+        ("selectbox", "_w_finger_axis", "finger_recess_axis"),
+        ("slider", "finger_z_offset", "finger_recess_z_offset"),
+        ("selectbox", "_w_box_shape", "box_shape"),
+        ("selectbox", "_w_layout_style", "layout_style"),
+        ("slider", "_sl_figure_gap", "effective_figure_gap"),
+    ]:
+        assert _widget(at, kind, key).value == getattr(cfg, field), key
 
 
 class TestResult:

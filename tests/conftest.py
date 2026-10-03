@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 import trimesh
 
@@ -108,18 +106,3 @@ def dilated_sphere(sphere_stl_path, fast_test_config):
 
     prepared = inlayer.prepare_figure(sphere_stl_path, fast_test_config)
     return inlayer.dilate(prepared, fast_test_config.clearance, fast_test_config)
-
-
-@pytest.fixture(scope="session")
-def cylinder_mesh() -> trimesh.Trimesh:
-    """Watertighter Zylinder (Radius 4 mm, Hoehe 12 mm)."""
-    return trimesh.creation.cylinder(radius=4.0, height=12.0)
-
-
-@pytest.fixture(scope="session")
-def cylinder_stl_path(tmp_path_factory, cylinder_mesh) -> str:
-    """Schreibt den Zylinder als STL und liefert den Pfad zurueck."""
-    p = tmp_path_factory.mktemp("meshes") / "cylinder.stl"
-    cylinder_mesh.export(file_obj=str(p), file_type="stl")
-    return str(p)
-

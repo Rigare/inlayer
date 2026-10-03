@@ -120,8 +120,6 @@ def _cached_dilate(
     return inlayer.dilate(_mesh, clearance, config)
 
 
-_file_hash = app_helpers.file_hash
-
 # Face budget of the inlay in the result view
 INLAY_PREVIEW_FACES = 30000
 
@@ -299,15 +297,16 @@ def _requantize_axes(axes: tuple[str, ...]):
 
     Runs on every rerun, before the sliders exist: that keeps what the sliders
     show and what the pipeline reads identical, and keeps each value inside
-    its slider's range whatever step it was stored with.
+    its slider's range whatever step it was stored with. Writing the display
+    keys on every run also keeps them while their section is hidden -
+    Streamlit only drops the state of a hidden widget that nothing set.
     """
     for offsets in stored.values():
         for axis in axes:
             offsets[axis] = _quantize_axis(axis, offsets.get(axis, 0.0))
     for axis in axes:
-        if axis in st.session_state:
-            val = _quantize_axis(axis, st.session_state[axis])
-            st.session_state[axis] = val
+        if f"_sl_{axis}" in st.session_state:
+            val = _quantize_axis(axis, st.session_state[f"_sl_{axis}"])
             st.session_state[f"_sl_{axis}"] = val
             st.session_state[f"_ni_{axis}"] = val
 
@@ -316,7 +315,6 @@ RECESS_SELECT = "selected_recess_fig"
 # Widget key of the recess position: one slider for every figure, loaded with
 # the selected figure's stored value.
 RECESS_POS_KEY = "_sl_finger_recess_position"
-_selection_key = app_helpers.selection_key
 
 
 def _targets(sel_key: str) -> list[str]:
@@ -328,10 +326,8 @@ def _targets(sel_key: str) -> list[str]:
 
 def _load_axes(ref: str, axes: tuple[str, ...]):
     for axis in axes:
-        value = stored[ref][axis]
-        st.session_state[axis] = value
-        st.session_state[f"_sl_{axis}"] = value
-        st.session_state[f"_ni_{axis}"] = value
+        st.session_state[f"_sl_{axis}"] = stored[ref][axis]
+        st.session_state[f"_ni_{axis}"] = stored[ref][axis]
 
 
 def _load_recess(ref: str):
@@ -339,13 +335,12 @@ def _load_recess(ref: str):
 
 
 def _store_axis_value(axis: str, val: float):
-    """Quantizes the value, mirrors it into all its widget keys and stores it
-    for the currently selected figure(s)."""
+    """Quantizes the value, mirrors it into both widgets of its row and stores
+    it for the currently selected figure(s)."""
     val = _quantize_axis(axis, val)
-    st.session_state[axis] = val
     st.session_state[f"_sl_{axis}"] = val
     st.session_state[f"_ni_{axis}"] = val
-    for fid in _targets(_selection_key(axis)):
+    for fid in _targets(app_helpers.selection_key(axis)):
         stored[fid][axis] = val
 
 
@@ -402,61 +397,64 @@ def _figure_select(label: str, sel_key: str):
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.printer.heading"))
 
+# Start values are the pipeline's defaults, read from Config like the CLI
+# does - a second set of literals here could drift unnoticed.
 clearance = st.sidebar.slider(
-    t("app.clearance.label"), min_value=0.1, max_value=2.0, value=0.4, step=0.1,
-    help=t("app.clearance.help"), key="clearance",
+    t("app.clearance.label"), min_value=0.1, max_value=2.0, step=0.1,
+    value=inlayer.Config.clearance, help=t("app.clearance.help"), key="clearance",
 )
 wall_thickness = st.sidebar.slider(
-    t("app.wall_thickness.label"), min_value=1.0, max_value=5.0, value=2.0, step=0.5,
-    help=t("app.wall_thickness.help"), key="wall_thickness",
+    t("app.wall_thickness.label"), min_value=1.0, max_value=5.0, step=0.5,
+    value=inlayer.Config.wall_thickness, help=t("app.wall_thickness.help"), key="wall_thickness",
 )
 depth_fraction = st.sidebar.slider(
-    t("app.depth_fraction.label"), min_value=0.3, max_value=1.0, value=0.7, step=0.05,
-    help=t("app.depth_fraction.help"), key="depth_fraction",
+    t("app.depth_fraction.label"), min_value=0.3, max_value=1.0, step=0.05,
+    value=inlayer.Config.depth_fraction, help=t("app.depth_fraction.help"), key="depth_fraction",
 )
 voxel_pitch = st.sidebar.slider(
-    t("app.voxel_pitch.label"), min_value=0.2, max_value=1.0, value=0.4, step=0.1,
-    help=t("app.voxel_pitch.help"), key="voxel_pitch",
+    t("app.voxel_pitch.label"), min_value=0.2, max_value=1.0, step=0.1,
+    value=inlayer.Config.voxel_pitch, help=t("app.voxel_pitch.help"), key="voxel_pitch",
 )
 decimate_faces = st.sidebar.number_input(
-    t("app.decimate_faces.label"), min_value=5000, max_value=50000, value=20000, step=5000,
-    help=t("app.decimate_faces.help"), key="decimate_faces",
+    t("app.decimate_faces.label"), min_value=5000, max_value=50000, step=5000,
+    value=inlayer.Config.decimate_faces, help=t("app.decimate_faces.help"), key="decimate_faces",
 )
 scale = st.sidebar.number_input(
-    t("app.scale.label"), min_value=0.01, max_value=100.0, value=1.0, step=0.1,
-    help=t("app.scale.help"), key="scale",
+    t("app.scale.label"), min_value=0.01, max_value=100.0, step=0.1,
+    value=inlayer.Config.stl_unit_to_mm, help=t("app.scale.help"), key="scale",
 )
 
 # --- Finger recesses: position per figure -----------------------------------
 enable_finger_recesses = st.sidebar.checkbox(
     t("app.finger.enable.label"),
-    value=False,
+    value=inlayer.Config.enable_finger_recesses,
     help=t("app.finger.enable.help"),
     key="finger_enabled",
 )
-finger_radius = 8.0
-finger_recess_axis = "x"
-finger_recess_z_offset = 0.0
+finger_radius = inlayer.Config.finger_radius
+finger_recess_axis = inlayer.Config.finger_recess_axis
+finger_recess_z_offset = inlayer.Config.finger_recess_z_offset
 if enable_finger_recesses:
     finger_radius = st.sidebar.slider(
         t("app.finger.radius.label"),
         min_value=5.0,
         max_value=15.0,
-        value=8.0,
+        value=inlayer.Config.finger_radius,
         step=0.5,
         help=t("app.finger.radius.help"),
         key="finger_radius",
     )
     finger_recess_axis = _select(
         t("app.finger.axis.label"),
-        {"x": t("app.finger.axis.x"), "y": t("app.finger.axis.y")}, "finger_axis", "x",
+        {"x": t("app.finger.axis.x"), "y": t("app.finger.axis.y")}, "finger_axis",
+        inlayer.Config.finger_recess_axis,
         help=t("app.finger.axis.help"),
     )
     finger_recess_z_offset = st.sidebar.slider(
         t("app.finger.z_offset.label"),
         min_value=0.0,
         max_value=30.0,
-        value=0.0,
+        value=inlayer.Config.finger_recess_z_offset,
         step=0.5,
         help=t("app.finger.z_offset.help"),
         key="finger_z_offset",
@@ -480,7 +478,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.performance.heading"))
 enable_parallel = st.sidebar.checkbox(
     t("app.parallel.label"),
-    value=False,
+    value=inlayer.Config.enable_parallel,
     help=t("app.parallel.help", workers=inlayer.MAX_PARALLEL_WORKERS),
     key="parallel",
 )
@@ -489,7 +487,8 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.box.heading"))
 box_shape = _select(
     t("app.box.shape.label"),
-    {"box": t("app.box.shape.box"), "cylinder": t("app.box.shape.cylinder")}, "box_shape", "box",
+    {"box": t("app.box.shape.box"), "cylinder": t("app.box.shape.cylinder")}, "box_shape",
+    inlayer.Config.box_shape,
     help=t("app.box.shape.help"),
 )
 use_custom_box = st.sidebar.checkbox(t("app.box.custom.label"), value=False, key="use_custom_box")
@@ -510,17 +509,16 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.position.heading"))
 
 
-def _sync_gap_from_slider():
-    val = st.session_state["_sl_figure_gap"]
-    st.session_state["figure_gap"] = val
-    st.session_state["_ni_figure_gap"] = val
-    st.session_state["_gap_user_set"] = True
+# The gap value itself plus its slider and number field
+GAP_KEYS = ("figure_gap", "_sl_figure_gap", "_ni_figure_gap")
 
 
-def _sync_gap_from_input():
-    val = st.session_state["_ni_figure_gap"]
-    st.session_state["figure_gap"] = val
-    st.session_state["_sl_figure_gap"] = val
+def _sync_gap(source: str):
+    """Copies the edited gap widget into the gap and the other widget. From
+    then on the gap no longer follows the wall thickness."""
+    val = st.session_state[source]
+    for key in GAP_KEYS:
+        st.session_state[key] = val
     st.session_state["_gap_user_set"] = True
 
 
@@ -530,16 +528,19 @@ if multi_mode:
     # user sets one of their own - as the help text and the CLI say. It used
     # to be copied once, so changing the wall thickness left the gap behind.
     if not st.session_state.get("_gap_user_set"):
-        for _key in ("figure_gap", "_sl_figure_gap", "_ni_figure_gap"):
+        for _key in GAP_KEYS:
             st.session_state[_key] = float(wall_thickness)
-    for _key in ("_sl_figure_gap", "_ni_figure_gap"):
+    for _key in GAP_KEYS[1:]:
         st.session_state.setdefault(_key, float(st.session_state["figure_gap"]))
 
     # One caption for slider and number field (both label_visibility="collapsed").
-    # No fixed colour: the text has to follow the theme's text colour.
+    # No fixed colour: the text has to follow the theme's text colour. The help
+    # sits on the caption: Streamlit drops a widget's tooltip together with a
+    # collapsed label, so on the slider it was never shown.
     st.sidebar.markdown(
         f'<span style="font-size:0.9rem;">{t("app.gap.label")}</span>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
+        help=t("app.gap.help"),
     )
     _g1, _g2 = st.sidebar.columns([3, 1])
     with _g1:
@@ -548,9 +549,8 @@ if multi_mode:
             min_value=0.5, max_value=40.0,
             step=0.5,
             key="_sl_figure_gap",
-            on_change=_sync_gap_from_slider,
+            on_change=_sync_gap, args=("_sl_figure_gap",),
             label_visibility="collapsed",
-            help=t("app.gap.help")
         )
     with _g2:
         st.number_input(
@@ -558,7 +558,7 @@ if multi_mode:
             min_value=0.5, max_value=40.0,
             step=0.5,
             key="_ni_figure_gap",
-            on_change=_sync_gap_from_input,
+            on_change=_sync_gap, args=("_ni_figure_gap",),
             label_visibility="collapsed",
         )
     figure_gap = float(st.session_state["figure_gap"])
@@ -567,9 +567,10 @@ else:
 
 layout_style = _select(
     t("app.layout.label"),
-    {x: t(f"app.layout.{x}") for x in ("compact", "horizontal", "vertical")}, "layout_style", "compact",
+    {x: t(f"app.layout.{x}") for x in ("compact", "horizontal", "vertical")}, "layout_style",
+    inlayer.Config.layout_style,
     help=t("app.layout.help"),
-) if multi_mode else "compact"
+) if multi_mode else inlayer.Config.layout_style
 
 
 def _axis_row(axis: str, label: str, lo: float, hi: float, step: float, hint: str):
@@ -699,7 +700,7 @@ if run_btn:
         elif os.path.exists(fallback_path):
             input_paths = [fallback_path]
             file_names = [fallback_path]
-            file_hashes = [_file_hash(fallback_path)]
+            file_hashes = [app_helpers.file_hash(fallback_path)]
         else:
             st.error(t("app.error.no_input", path=fallback_path))
             st.stop()

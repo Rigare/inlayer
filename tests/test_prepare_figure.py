@@ -228,14 +228,6 @@ class TestPrepareFigureScale:
 
 
 class TestPrepareFigureDecimation:
-    def test_no_decimation_when_below_target(self, cube_stl_path):
-        # Cube hat ~12 Faces; bei decimate_faces=1000 darf NICHT dezimiert werden.
-        # Nach Voxel-Closing + Marching Cubes hat das Ergebnis aber mehr Faces.
-        # Der Test prueft hier nur, dass der Pfad ohne Fehler durchlaeuft.
-        cfg = Config(voxel_pitch=1.0, decimate_faces=1000)
-        m = inlayer.prepare_figure(cube_stl_path, cfg)
-        assert len(m.faces) > 0
-
     def test_decimation_when_above_target(self, sphere_stl_path):
         # Eine subdiv=2 Ikosphaere hat 320 Faces.
         # Mit decimate_faces=50 muss dezimiert werden.

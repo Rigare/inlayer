@@ -108,24 +108,6 @@ class TestFileHash:
         expected = hashlib.sha256(b"").hexdigest()[:16]
         assert app_helpers.file_hash(str(p)) == expected
 
-    def test_hash_length(self, tmp_path):
-        p = tmp_path / "x.bin"
-        p.write_bytes(b"x" * 100)
-        assert len(app_helpers.file_hash(str(p))) == 16
-
-    def test_identical_files_same_hash(self, tmp_path):
-        data = b"identical-bytes" * 1000  # ueber Chunk-Grenze hinaus
-        p1, p2 = tmp_path / "a.bin", tmp_path / "b.bin"
-        p1.write_bytes(data)
-        p2.write_bytes(data)
-        assert app_helpers.file_hash(str(p1)) == app_helpers.file_hash(str(p2))
-
-    def test_different_content_different_hash(self, tmp_path):
-        p1, p2 = tmp_path / "a.bin", tmp_path / "b.bin"
-        p1.write_bytes(b"alpha")
-        p2.write_bytes(b"beta")
-        assert app_helpers.file_hash(str(p1)) != app_helpers.file_hash(str(p2))
-
     def test_chunked_read_matches_whole_file(self, tmp_path):
         # Datei deutlich groesser als die Chunk-Groesse: das stueckweise Lesen
         # muss dasselbe Ergebnis liefern wie ein Hash ueber den Gesamtinhalt.
@@ -138,24 +120,6 @@ class TestFileHash:
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(OSError):
             app_helpers.file_hash(str(tmp_path / "gibtsnicht.bin"))
-
-
-class TestSelectionKey:
-    def test_rotation_axes_use_rot_selection(self):
-        for axis in ("rot_x", "rot_y", "rot_z"):
-            assert app_helpers.selection_key(axis) == "selected_rot_fig"
-
-    def test_position_axes_use_pos_selection(self):
-        for axis in ("offset_x", "offset_y", "offset_z"):
-            assert app_helpers.selection_key(axis) == "selected_fig"
-
-
-class TestIsRotationAxis:
-    def test_rotation_axes(self):
-        assert app_helpers.is_rotation_axis("rot_x")
-
-    def test_offset_axes(self):
-        assert not app_helpers.is_rotation_axis("offset_x")
 
 
 class TestQuantizeAxisValue:

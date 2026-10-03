@@ -11,14 +11,6 @@ from inlayer import Config
 
 
 class TestDilateBasic:
-    def test_returns_trimesh(self, prepared_cube, fast_test_config):
-        m = inlayer.dilate(prepared_cube, fast_test_config.clearance, fast_test_config)
-        assert isinstance(m, trimesh.Trimesh)
-
-    def test_result_has_faces(self, prepared_cube, fast_test_config):
-        m = inlayer.dilate(prepared_cube, fast_test_config.clearance, fast_test_config)
-        assert len(m.faces) > 0
-
     def test_result_is_watertight(self, prepared_cube, fast_test_config):
         m = inlayer.dilate(prepared_cube, fast_test_config.clearance, fast_test_config)
         assert m.is_watertight

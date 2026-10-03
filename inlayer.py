@@ -62,12 +62,11 @@ def _non_negative(value: float) -> bool:
 # each rule has exactly one message: "-c -0.5" used to say "must be > 0"
 # although 0 is allowed.
 _RANGE_RULES: Final = (
-    (_positive, ("wall_thickness", "voxel_pitch", "stl_unit_to_mm", "finger_radius",
-                 "box_width", "box_depth", "box_height", "box_diameter", "figure_gap")),
-    (_non_negative, ("clearance", "finger_recess_z_offset")),
+    (_positive, "config.must_be_positive",
+     ("wall_thickness", "voxel_pitch", "stl_unit_to_mm", "finger_radius",
+      "box_width", "box_depth", "box_height", "box_diameter", "figure_gap")),
+    (_non_negative, "config.must_be_non_negative", ("clearance", "finger_recess_z_offset")),
 )
-_RANGE_MESSAGES: Final = {_positive: "config.must_be_positive",
-                          _non_negative: "config.must_be_non_negative"}
 
 
 @dataclass(frozen=True)
@@ -112,11 +111,11 @@ class Config:
             value = getattr(self, field.name)
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(t_("config.must_be_finite", name=field.name, value=value))
-        for rule, names in _RANGE_RULES:
+        for rule, message, names in _RANGE_RULES:
             for name in names:
                 value = getattr(self, name)
                 if value is not None and not rule(value):
-                    raise ValueError(t_(_RANGE_MESSAGES[rule], name=name, value=value))
+                    raise ValueError(t_(message, name=name, value=value))
         if not 0.0 < self.depth_fraction <= 1.0:
             raise ValueError(t_("config.must_be_fraction", name="depth_fraction",
                                 value=self.depth_fraction))
@@ -304,19 +303,16 @@ def _grid_to_mesh(matrix: np.ndarray, transform: np.ndarray) -> trimesh.Trimesh:
 def apply_euler_rotation(
     mesh: trimesh.Trimesh, rot_x: float, rot_y: float, rot_z: float
 ) -> trimesh.Trimesh:
-    """Dreht eine Kopie des Meshes um die XYZ-Achsen (Winkel in Grad).
+    """Rotates a copy of the mesh about the X, Y and Z axes (angles in degrees).
 
-    Reihenfolge der Anwendung: erst X, dann Y, dann Z (Rz·Ry·Rx). Gibt das
-    Mesh bei Nullrotation unveraendert (als Kopie) zurueck.
+    Applied in that order - first X, then Y, then Z (Rz·Ry·Rx), each about
+    the fixed world axes ("sxyz"). Without rotation the copy is unchanged:
+    apply_transform skips an identity matrix.
     """
-    if rot_x == 0.0 and rot_y == 0.0 and rot_z == 0.0:
-        return mesh.copy()
     m = mesh.copy()
-    Rx = trimesh.transformations.rotation_matrix(np.radians(rot_x), [1, 0, 0])
-    Ry = trimesh.transformations.rotation_matrix(np.radians(rot_y), [0, 1, 0])
-    Rz = trimesh.transformations.rotation_matrix(np.radians(rot_z), [0, 0, 1])
-    R = trimesh.transformations.concatenate_matrices(Rz, Ry, Rx)
-    m.apply_transform(R)
+    m.apply_transform(trimesh.transformations.euler_matrix(
+        *np.radians([rot_x, rot_y, rot_z]), axes="sxyz"
+    ))
     return m
 
 
@@ -435,7 +431,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     m = load_mesh(path, name=path)
     if config.stl_unit_to_mm != 1.0:
         m.apply_scale(config.stl_unit_to_mm)
-    _log(t_("pipeline.loaded", faces=f"{len(m.faces):,}", extents=m.extents.round(2)), t)
+    _log(t_("pipeline.loaded", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
     _check_grid_size(m.extents, config.voxel_pitch / 2, name=path)
 
     # Repair only when there is something to repair. pymeshfix is the most
@@ -447,7 +443,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     # hits the interior instead of running outwards.
     t = _log(t_("pipeline.repair"))
     if m.is_watertight and m.is_winding_consistent:
-        _log(t_("pipeline.repair_skipped", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.repair_skipped", faces=i18n.format_int(len(m.faces))), t)
     else:
         mf = pymeshfix.MeshFix(m.vertices, m.faces)
         # pymeshfix's default removes every shell but the one with the most
@@ -456,15 +452,15 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         # part survived depended on an unrelated hole anywhere in the file.
         mf.repair(remove_smallest_components=False)
         m = trimesh.Trimesh(vertices=mf.points, faces=mf.faces)
-        _log(t_("pipeline.repaired", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.repaired", faces=i18n.format_int(len(m.faces))), t)
 
-    t = _log(t_("pipeline.decimate", target=f"{config.decimate_faces:,}"))
+    t = _log(t_("pipeline.decimate", target=i18n.format_int(config.decimate_faces)))
     current_faces = len(m.faces)
     if current_faces > config.decimate_faces:
         m = decimate_mesh(m, config.decimate_faces)
-        _log(t_("pipeline.decimated", faces=f"{len(m.faces):,}"), t)
+        _log(t_("pipeline.decimated", faces=i18n.format_int(len(m.faces))), t)
     else:
-        _log(t_("pipeline.decimate_skipped", faces=f"{current_faces:,}"), t)
+        _log(t_("pipeline.decimate_skipped", faces=i18n.format_int(current_faces)), t)
 
     t = _log(t_("pipeline.voxelize_closing"))
     vox = _voxelize_surface(m, config.voxel_pitch)
@@ -478,7 +474,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
     closed = binary_closing(padded, iterations=iters)
 
     m = _grid_to_mesh(closed, _padded_transform(vox.transform, iters))
-    _log(t_("pipeline.result", faces=f"{len(m.faces):,}", extents=m.extents.round(2)), t)
+    _log(t_("pipeline.result", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
 
     return m
 
@@ -558,7 +554,8 @@ def dilate(
     # iters=0 leaves the transform unchanged, so one call serves both cases.
     result = _grid_to_mesh(dilated, _padded_transform(vox.transform, iters))
     _log(
-        t_("pipeline.result", faces=f"{len(result.faces):,}", extents=result.extents.round(2)), t
+        t_("pipeline.result", faces=i18n.format_int(len(result.faces)),
+           extents=result.extents.round(2)), t
     )
     return result
 
@@ -631,11 +628,6 @@ def arrange_footprints(
         y += max(sizes[i][1] for i in row) + gap
     _log(t_("pipeline.shelves", n=n, rows=len(rows)), t)
     return positions
-
-
-def _is_manifold(m: trimesh.Trimesh) -> bool:
-    """True for a watertight mesh with at least one face."""
-    return m.is_watertight and len(m.faces) > 0
 
 
 def _to_manifold(mesh: trimesh.Trimesh) -> Manifold:
@@ -902,14 +894,14 @@ def build_inlay(
         # The Z offset is applied afterwards; fill far enough that the cavity
         # still reaches past the top face once it has moved.
         solid = _solidify_figure(local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2])
-        _log(t_("pipeline.solidified", faces=f"{len(solid.faces):,}"), t)
+        _log(t_("pipeline.solidified", faces=i18n.format_int(len(solid.faces))), t)
         return solid
 
     solids = _parallel_map(
         solidify_logged, range(n), config, what=t_("pipeline.what.solidify")
     )
     for label, solid in zip(labels, solids):
-        if not _is_manifold(solid):
+        if not (solid.is_watertight and len(solid.faces) > 0):
             raise ValueError(t_("error.not_manifold", label=label))
 
     recesses: list[list[trimesh.Trimesh]] = [[] for _ in range(n)]
@@ -996,7 +988,7 @@ def build_inlay(
         raise RuntimeError(t_("error.csg_failed")) from exc
     if len(inlay.faces) == 0:
         raise ValueError(t_("error.csg_empty"))
-    _log(t_("pipeline.csg_result", faces=f"{len(inlay.faces):,}"), t)
+    _log(t_("pipeline.csg_result", faces=i18n.format_int(len(inlay.faces))), t)
 
     wall_check = _wall_check(box_m, cutters, inlay_m, config, apothem)
 
