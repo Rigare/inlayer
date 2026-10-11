@@ -60,6 +60,13 @@ class TestPrepareFigureErrors:
         with pytest.raises(ValueError, match="sheet.stl has no volume"):
             inlayer.prepare_figure(str(path), fast_test_config)
 
+    def test_errors_use_the_given_name(self, tmp_path):
+        """The web app passes the upload's name; the path is a temporary file."""
+        path = tmp_path / "tmpk3x9.stl"
+        path.write_bytes(b"")
+        with pytest.raises(ValueError, match="^my figure.stl contains no triangles"):
+            inlayer.prepare_figure(str(path), name="my figure.stl")
+
     def test_oversized_grid_is_refused_up_front(self, cube_stl_path):
         """A small file scaled up must fail with a message, not exhaust memory."""
         cfg = Config(stl_unit_to_mm=1000.0, voxel_pitch=0.2)

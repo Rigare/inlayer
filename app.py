@@ -94,13 +94,17 @@ st.markdown(
 # --- Caching ----------------------------------------------------------------
 @st.cache_resource(show_spinner=False, max_entries=32)
 def _cached_prepare(
-    _path: str, file_hash: str, scale: float, pitch: float, decimate_faces: int
+    _path: str, _name: str, file_hash: str, scale: float, pitch: float, decimate_faces: int
 ) -> trimesh.Trimesh:
-    """Step 1, cached as long as file content and parameters stay the same."""
+    """Step 1, cached as long as file content and parameters stay the same.
+
+    `_path` is the upload's temporary file, `_name` what the user called it:
+    errors name the latter. Neither is part of the cache key.
+    """
     config = inlayer.Config(
         stl_unit_to_mm=scale, voxel_pitch=pitch, decimate_faces=decimate_faces
     )
-    return inlayer.prepare_figure(_path, config)
+    return inlayer.prepare_figure(_path, config, name=_name)
 
 
 @st.cache_resource(show_spinner=False, max_entries=32)
@@ -759,7 +763,7 @@ if run_btn:
             if is_multi and not enable_parallel:
                 logger.log(t("app.log.figure_n", i=i + 1, n=n_files, name=file_names[i]))
             mesh = _cached_prepare(
-                input_paths[i], file_hashes[i], scale, voxel_pitch, decimate_faces
+                input_paths[i], file_names[i], file_hashes[i], scale, voxel_pitch, decimate_faces
             )
             rotated = inlayer.apply_euler_rotation(mesh, *rotations[i]) if any(rotations[i]) else mesh
             return mesh, rotated

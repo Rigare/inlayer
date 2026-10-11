@@ -469,18 +469,26 @@ def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
     return cast(Any, trimesh.voxel.VoxelGrid)(matrix, transform=transform)
 
 
-def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
-    """Loads, repairs, decimates and smooths an input figure."""
+def prepare_figure(
+    path: str, config: Config = _DEFAULT_CFG, name: str | None = None
+) -> trimesh.Trimesh:
+    """Loads, repairs, decimates and smooths an input figure.
+
+    `name` is what log lines and errors call the file - by default its path.
+    The web app reads uploads from temporary files: a message about
+    /tmp/tmpk3x9.stl tells the user nothing about which of their files it means.
+    """
     if not os.path.isfile(path):
         raise FileNotFoundError(t_("error.input_not_found", path=path))
+    name = name or path
 
     t = time.perf_counter()
-    _log(t_("pipeline.load", path=path))
-    m = load_mesh(path, name=path)
+    _log(t_("pipeline.load", path=name))
+    m = load_mesh(path, name=name)
     if config.stl_unit_to_mm != 1.0:
         m.apply_scale(config.stl_unit_to_mm)
     _log(t_("pipeline.loaded", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
-    _check_grid_size(m.extents, config.voxel_pitch / 2, name=path)
+    _check_grid_size(m.extents, config.voxel_pitch / 2, name=name)
 
     # Repair only when there is something to repair. pymeshfix is the most
     # expensive single step before voxelization (measured ~30 % of
@@ -503,7 +511,7 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         if len(m.faces) == 0:
             # Nothing that could be closed into a solid: a flat surface, or
             # triangles collapsed to a line or a point
-            raise ValueError(t_("error.not_solid", name=path))
+            raise ValueError(t_("error.not_solid", name=name))
         _log(t_("pipeline.repaired", faces=i18n.format_int(len(m.faces))), t)
 
     t = _log(t_("pipeline.decimate", target=i18n.format_int(config.decimate_faces)))

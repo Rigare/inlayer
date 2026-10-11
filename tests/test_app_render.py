@@ -84,6 +84,23 @@ class TestUploadRobustness:
         assert list(_trace_extents(at)) == ["a.stl"]
 
 
+class TestFailedRun:
+    """A run that fails says which upload it failed on."""
+
+    # Previews fine, but is no solid: the pipeline refuses it
+    SHEET = binary_stl([[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]])
+
+    def test_error_names_the_upload_not_its_temp_file(self):
+        """The run reads uploads from temporary files and the message named
+        those: "/tmp/tmpk3x9.stl contains no triangles" - which of two uploads?"""
+        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10])), ("sheet.stl", self.SHEET)])
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        (message,) = [e.value for e in at.error]
+        assert "sheet.stl has no volume" in message
+        assert "tmp" not in message
+
+
 class TestCacheIdentity:
     """Process-wide caches are keyed by content, never by name and size."""
 
