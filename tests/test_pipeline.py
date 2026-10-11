@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import trimesh
 
@@ -14,6 +15,19 @@ import inlayer
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Coarse and quick: enough for everything that is not about the resolution
+FAST = ["-vp", "1.0", "--decimate-faces", "1000"]
+
+
+def run_main(capsys, *argv) -> tuple[int, str, str]:
+    """Runs the CLI in-process: (exit code, stdout, stderr)."""
+    try:
+        code = inlayer.main([str(arg) for arg in argv])
+    except SystemExit as exc:  # argparse: usage error or --help
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
 
 
 @pytest.mark.slow
@@ -294,10 +308,23 @@ class TestCLI:
             text=True,
             timeout=30,
         )
-        assert result.returncode != 0
-        # Fehlertext kommt entweder ueber stderr oder stdout (traceback)
-        combined = result.stdout + result.stderr
-        assert "nicht gefunden" in combined or "FileNotFoundError" in combined
+        # This test used to pass *because* of the traceback: the only thing it
+        # found in the output was the exception's class name.
+        assert result.returncode == 2
+        assert "Input file not found" in result.stderr
+        assert "Traceback" not in result.stderr
+
+    def test_cli_unreadable_input_fails_without_a_traceback(self, tmp_path):
+        broken = tmp_path / "broken.stl"
+        broken.write_bytes(np.random.default_rng(0).bytes(500))
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "inlayer.py"), "-i", str(broken),
+             "-o", str(tmp_path / "inlay.stl")],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == inlayer.EXIT_FAILED
+        assert "broken.stl contains no triangles" in result.stderr
+        assert "Traceback" not in result.stderr
 
     def test_cli_invalid_param_fails(self, cube_stl_path, tmp_path):
         """An invalid value is a usage error naming the field, not a traceback."""
@@ -331,6 +358,73 @@ class TestCLI:
         assert result.returncode == 2
         assert message in result.stderr
         assert "Traceback" not in result.stderr
+
+
+class TestCLIErrors:
+    """Whatever stops a run is one line on stderr and an exit code.
+
+    Only the Config was built inside a try: a missing or unreadable input, a
+    grid beyond the limit and an output directory that does not exist all
+    ended in a traceback with exit code 1 - the last one after the whole
+    computation.
+    """
+
+    def test_missing_default_input_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
+        """`python inlayer.py` without -i, in a directory without figure.stl."""
+        monkeypatch.chdir(tmp_path)
+        code, out, err = run_main(capsys, "-o", tmp_path / "inlay.stl")
+        assert code == 2
+        assert "Input file not found: figure.stl" in err
+        assert "[1/4]" not in out
+
+    def test_every_input_is_checked_before_the_first_is_prepared(self, cube_stl_path, tmp_path, capsys):
+        code, out, err = run_main(
+            capsys, "-i", cube_stl_path, tmp_path / "missing.stl", "-o", tmp_path / "inlay.stl"
+        )
+        assert code == 2
+        assert "missing.stl" in err
+        assert "[1/4]" not in out
+
+    @pytest.mark.parametrize("target", ["no_such_dir/inlay.stl", "."])
+    def test_output_path_is_checked_before_the_work(self, cube_stl_path, tmp_path, capsys, target):
+        code, out, err = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / target, *FAST)
+        assert code == 2
+        assert "Cannot write the output file" in err
+        assert "[1/4]" not in out
+
+    def test_unreadable_stl_exits_with_1(self, tmp_path, capsys):
+        broken = tmp_path / "broken.stl"
+        broken.write_bytes(np.random.default_rng(0).bytes(500))
+        out_path = tmp_path / "inlay.stl"
+        code, _, err = run_main(capsys, "-i", broken, "-o", out_path)
+        assert code == inlayer.EXIT_FAILED == 1
+        assert "broken.stl contains no triangles" in err
+        assert not out_path.exists()
+
+    def test_oversized_grid_exits_with_1_and_says_what_to_do(self, cube_stl_path, tmp_path, capsys):
+        code, _, err = run_main(
+            capsys, "-i", cube_stl_path, "-o", tmp_path / "inlay.stl", "--scale", "1000", "-vp", "0.2"
+        )
+        assert code == inlayer.EXIT_FAILED
+        assert "too large for this resolution" in err and "Choose a larger voxel_pitch" in err
+
+    def test_out_of_memory_is_said_in_plain_words(self, cube_stl_path, tmp_path, capsys, monkeypatch):
+        def no_memory(*args, **kwargs):
+            raise MemoryError("Unable to allocate 4.33 GiB for an array with shape (48384000, 4, 3)")
+
+        monkeypatch.setattr(inlayer, "dilate", no_memory)
+        code, _, err = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / "inlay.stl", *FAST)
+        assert code == inlayer.EXIT_FAILED
+        assert "Not enough memory" in err and "48384000" not in err
+
+    def test_a_bug_still_shows_its_traceback(self, cube_stl_path, tmp_path, monkeypatch):
+        """Only what the pipeline raises on purpose is turned into a message."""
+        def broken(*args, **kwargs):
+            raise TypeError("a programming error")
+
+        monkeypatch.setattr(inlayer, "dilate", broken)
+        with pytest.raises(TypeError):
+            inlayer.main(["-i", cube_stl_path, "-o", str(tmp_path / "inlay.stl"), *FAST])
 
 
 @pytest.mark.slow

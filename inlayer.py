@@ -1095,6 +1095,10 @@ def wall_thickness_stats_3d(inlay: trimesh.Trimesh) -> dict:
 # on a usage error, and a script must be able to tell the two apart.
 EXIT_CHECK_FAILED: Final[int] = 3
 
+# Exit code of the CLI when the run itself fails (an unreadable STL, a grid
+# beyond MAX_GRID_VOXELS, no memory): one line on stderr, no inlay written.
+EXIT_FAILED: Final[int] = 1
+
 
 def describe_violation(violation: dict, names: list[str]) -> str:
     """One readable line per wall-check finding, naming the figure(s)."""
@@ -1252,6 +1256,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Everything that can be rejected is rejected here, before minutes of
     # voxel work: argparse then prints a usage error instead of a traceback.
+    for path in input_paths:
+        if not os.path.isfile(path):
+            parser.error(t_("error.input_not_found", path=path))
+    # The inlay is written after all the work is done - a typo in the output
+    # directory used to cost the whole run.
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    if os.path.isdir(args.output) or not os.path.isdir(out_dir) or not os.access(
+        args.output if os.path.exists(args.output) else out_dir, os.W_OK
+    ):
+        parser.error(t_("cli.error.output_not_writable", path=args.output))
     # One recess position applies to every figure, otherwise one per input
     # file - only checked when recesses are on, the flag does nothing else.
     recess_positions = list(args.finger_recess_position)
@@ -1302,28 +1316,36 @@ def main(argv: list[str] | None = None) -> int:
              else t_("cli.label.figure"))
     print(t_("cli.step1", label=label))
 
-    prepared = _parallel_map(
-        lambda p: prepare_figure(p, config), input_paths, config,
-        what=t_("pipeline.what.prepare"),
-    )
-    rotated = [
-        apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
-    ]
+    try:
+        prepared = _parallel_map(
+            lambda p: prepare_figure(p, config), input_paths, config,
+            what=t_("pipeline.what.prepare"),
+        )
+        rotated = [
+            apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
+        ]
 
-    # Step 2: tolerance offset per figure (optionally in parallel)
-    print(t_("cli.step2"))
-    dilated_meshes = _parallel_map(
-        lambda item: dilate(item[0], config.clearance, config, name=item[1]),
-        zip(rotated, input_paths), config, what=t_("pipeline.what.dilate"),
-    )
+        # Step 2: tolerance offset per figure (optionally in parallel)
+        print(t_("cli.step2"))
+        dilated_meshes = _parallel_map(
+            lambda item: dilate(item[0], config.clearance, config, name=item[1]),
+            zip(rotated, input_paths), config, what=t_("pipeline.what.dilate"),
+        )
 
-    # Step 3: arrange, cut and check (build_inlay does all three)
-    print(t_("cli.step3"))
-    inlay, box_w, box_d, box_h = build_inlay(
-        dilated_meshes, config, file_names=input_paths,
-        individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
-    )
-    inlay.export(file_obj=args.output, file_type="stl")
+        # Step 3: arrange, cut and check (build_inlay does all three)
+        print(t_("cli.step3"))
+        inlay, box_w, box_d, box_h = build_inlay(
+            dilated_meshes, config, file_names=input_paths,
+            individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
+        )
+        inlay.export(file_obj=args.output, file_type="stl")
+    except (ValueError, RuntimeError, OSError, MemoryError) as exc:
+        # What the pipeline raises on purpose names the file and the remedy.
+        # A traceback on top of it buried that one line; anything else is a
+        # bug and still shows its traceback.
+        reason = t_("cli.error.out_of_memory") if isinstance(exc, MemoryError) else exc
+        print(t_("cli.error.failed", error=reason), file=sys.stderr)
+        return EXIT_FAILED
     print(t_("cli.saved", path=args.output))
 
     # Step 4: wall check

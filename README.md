@@ -245,7 +245,8 @@ you can inspect it.
 | Exit code | Meaning |
 |---|---|
 | `0` | Inlay written, wall check passed |
-| `2` | Invalid arguments (argparse usage error) — nothing was computed |
+| `1` | The run failed — an unreadable STL, a voxel grid too large for the resolution, a box too small to leave any material, not enough memory. One line on stderr says which; no inlay is written |
+| `2` | Invalid arguments (argparse usage error), an input file that does not exist or an output path that cannot be written — nothing was computed |
 | `3` | Inlay written, but the wall check found problems |
 
 All `--finger-recess-position` values are validated while parsing. Their count

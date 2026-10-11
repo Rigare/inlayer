@@ -928,6 +928,18 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "--finger-recess-position erwartet 1 Wert oder einen je Eingabedatei ({given} angegeben, {n} Dateien)",
         "en": "--finger-recess-position expects 1 value or one per input file (got {given} for {n} files)",
     },
+    "cli.error.output_not_writable": {
+        "de": "Ausgabedatei {path} kann nicht geschrieben werden: der Pfad ist ein Verzeichnis, oder sein Verzeichnis fehlt oder ist nicht beschreibbar.",
+        "en": "Cannot write the output file {path}: the path is a directory, or its directory is missing or not writable.",
+    },
+    "cli.error.failed": {
+        "de": "Fehler: {error}",
+        "en": "Error: {error}",
+    },
+    "cli.error.out_of_memory": {
+        "de": "Der Arbeitsspeicher reicht für diese Auflösung nicht aus. Wähle einen größeren voxel_pitch.",
+        "en": "Not enough memory for this resolution. Choose a larger voxel_pitch.",
+    },
     "cli.parallel": {
         "de": "Mehrere Figuren parallel auf mehreren CPU-Kernen verarbeiten (max. {workers} Threads, erhöht den Speicherbedarf)",
         "en": "Process several figures in parallel across CPU cores (max. {workers} threads, increases memory use)",
