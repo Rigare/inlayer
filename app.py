@@ -15,6 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import io
+import logging
 import os
 import time
 import tempfile
@@ -842,9 +843,17 @@ if run_btn:
             "is_multi": is_multi,
         }
 
-    except Exception as e:
-        status_box.error(t("app.error.failed", error=e))
-        st.exception(e)
+    except (ValueError, RuntimeError, MemoryError) as e:
+        # Raised on purpose, with a message written for the user: an unusable
+        # upload, a grid beyond the limit, a box that leaves no material.
+        reason = t("error.out_of_memory") if isinstance(e, MemoryError) else e
+        status_box.error(t("app.error.failed", error=reason))
+    except Exception:
+        # Anything else is a bug. Its traceback - absolute paths, source lines -
+        # belongs in the server log, not in the browser of whoever uses the app
+        # (st.exception shows it whatever client.showErrorDetails says).
+        logging.getLogger("inlayer.app").exception("Inlay run failed")
+        status_box.error(t("app.error.unexpected"))
 
     finally:
         for tp in tmp_paths:

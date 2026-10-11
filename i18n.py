@@ -459,6 +459,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Berechnung fehlgeschlagen: {error}",
         "en": "Computation failed: {error}",
     },
+    "app.error.unexpected": {
+        "de": "Bei der Berechnung ist ein unerwarteter Fehler aufgetreten. Die Details stehen im Protokoll des Servers.",
+        "en": "Something unexpected went wrong during the computation. The details are in the server's log.",
+    },
     # --- Fortschritt & Protokoll -------------------------------------------
     "app.label.figures": {
         "de": "{n} Figuren",
@@ -803,6 +807,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "{name} enthält keine Dreiecke – die Datei ist leer oder keine gültige STL.",
         "en": "{name} contains no triangles – the file is empty or not a valid STL.",
     },
+    "error.out_of_memory": {
+        "de": "Der Arbeitsspeicher reicht für diese Auflösung nicht aus. Wähle einen größeren voxel_pitch.",
+        "en": "Not enough memory for this resolution. Choose a larger voxel_pitch.",
+    },
     "error.not_solid": {
         "de": "{name} hat kein Volumen – die Datei muss einen geschlossenen Körper beschreiben, keine flache Fläche.",
         "en": "{name} has no volume – the file must describe a closed solid, not a flat surface.",
@@ -939,10 +947,6 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "cli.error.failed": {
         "de": "Fehler: {error}",
         "en": "Error: {error}",
-    },
-    "cli.error.out_of_memory": {
-        "de": "Der Arbeitsspeicher reicht für diese Auflösung nicht aus. Wähle einen größeren voxel_pitch.",
-        "en": "Not enough memory for this resolution. Choose a larger voxel_pitch.",
     },
     "cli.parallel": {
         "de": "Mehrere Figuren parallel auf mehreren CPU-Kernen verarbeiten (max. {workers} Threads, erhöht den Speicherbedarf)",

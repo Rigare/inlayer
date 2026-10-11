@@ -99,6 +99,22 @@ class TestFailedRun:
         (message,) = [e.value for e in at.error]
         assert "sheet.stl has no volume" in message
         assert "tmp" not in message
+        # The message is the whole story - no stack trace below it
+        assert not at.exception
+
+    def test_a_bug_goes_to_the_server_log_not_to_the_browser(self, monkeypatch, caplog):
+        """Every failure used to end in st.exception: the full traceback with
+        absolute paths and source lines, shown to whoever was using the app."""
+        def bug(*args, **kwargs):
+            raise TypeError("detail from /srv/inlayer/app.py")
+
+        monkeypatch.setattr(inlayer, "build_inlay", bug)
+        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10]))])
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception
+        assert [e.value for e in at.error] == [i18n.TRANSLATIONS["app.error.unexpected"]["en"]]
+        assert "detail from /srv/inlayer/app.py" in caplog.text
 
 
 class TestCacheIdentity:

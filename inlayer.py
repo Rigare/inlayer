@@ -1367,7 +1367,7 @@ def main(argv: list[str] | None = None) -> int:
         # What the pipeline raises on purpose names the file and the remedy.
         # A traceback on top of it buried that one line; anything else is a
         # bug and still shows its traceback.
-        reason = t_("cli.error.out_of_memory") if isinstance(exc, MemoryError) else exc
+        reason = t_("error.out_of_memory") if isinstance(exc, MemoryError) else exc
         print(t_("cli.error.failed", error=reason), file=sys.stderr)
         return EXIT_FAILED
     print(t_("cli.saved", path=args.output))
