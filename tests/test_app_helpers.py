@@ -161,7 +161,8 @@ class TestDecimateMesh:
         sphere = trimesh.creation.icosphere(subdivisions=4)  # 5120 Faces
         target = 500
         out = app_helpers.decimate_mesh(sphere, target)
-        assert len(out.faces) < len(sphere.faces)
+        # The requested count, not just "fewer": removing 1 % passed this test
+        assert 0.9 * target <= len(out.faces) <= 1.1 * target
 
     def test_small_mesh_returned_unchanged(self):
         box = trimesh.creation.box(extents=[1, 1, 1])  # 12 Faces

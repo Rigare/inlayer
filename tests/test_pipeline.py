@@ -41,7 +41,7 @@ class TestFullPipeline:
         inlay, w, d, h = inlayer.build_inlay(fig_ot, fast_test_config)
         stats = inlayer.wall_thickness_stats_3d(inlay)
 
-        assert inlay.is_watertight or len(inlay.faces) > 0
+        assert inlay.is_watertight
         assert stats["passes_min_wall"] is True
         # Box-Nullpunkt-Ausrichtung verifizieren
         assert inlay.bounds[0][0] == pytest.approx(0.0, abs=0.01)
@@ -212,8 +212,9 @@ class TestCLI:
             text=True,
             timeout=120,
         )
-        assert result.returncode != 0
-        assert "--finger-recess-position" in result.stderr
+        # Not just the flag's name: every usage error prints that, in the usage line
+        assert result.returncode == 2
+        assert "expects 1 value or one per input file (got 3 for 2 files)" in result.stderr
 
     def test_cli_recess_position_out_of_range_fails(self, cube_stl_path, sphere_stl_path, tmp_path):
         """Every value is checked while parsing - the second one used to fail

@@ -84,10 +84,17 @@ class TestConfigValidation:
             ("box_depth", -2.5),
             ("box_height", 0.0),
             ("box_height", -3.0),
+            # These three had no boundary test: without their rule the suite stayed green
+            ("box_diameter", 0.0),
+            ("box_diameter", -5.0),
+            ("figure_gap", 0.0),
+            ("figure_gap", -1.0),
+            ("finger_radius", 0.0),
+            ("finger_radius", -2.0),
         ],
     )
     def test_box_dimensions_must_be_positive(self, field, value):
-        with pytest.raises(ValueError, match=field):
+        with pytest.raises(ValueError, match=f"{field} must be > 0"):
             Config(**{field: value})
 
     def test_box_dimensions_none_allowed(self):

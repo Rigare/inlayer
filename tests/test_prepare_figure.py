@@ -300,6 +300,31 @@ class TestPrepareFigureDecimation:
         assert isinstance(m, trimesh.Trimesh)
         assert m.is_watertight
 
+    def test_the_decimated_mesh_is_what_gets_voxelized(self, sphere_stl_path, monkeypatch):
+        """The face count after the voxel step says nothing about the
+        decimation: with that step removed every test passed. The spy hands
+        back a mesh of half the size, which shows in the result."""
+        calls = []
+        decimate = inlayer.decimate_mesh
+
+        def halved(mesh, face_count):
+            calls.append((len(mesh.faces), face_count))
+            small = decimate(mesh, face_count)
+            small.apply_scale(0.5)
+            return small
+
+        monkeypatch.setattr(inlayer, "decimate_mesh", halved)
+        m = inlayer.prepare_figure(sphere_stl_path, Config(voxel_pitch=1.0, decimate_faces=50))
+        assert calls == [(320, 50)]
+        assert np.all(m.extents < 8.0)  # the 10 mm sphere, halved, plus voxel inflation
+
+    def test_below_the_target_nothing_is_decimated(self, sphere_stl_path, monkeypatch):
+        def never(mesh, face_count):
+            raise AssertionError("320 faces are below the target of 1000")
+
+        monkeypatch.setattr(inlayer, "decimate_mesh", never)
+        inlayer.prepare_figure(sphere_stl_path, Config(voxel_pitch=1.0, decimate_faces=1000))
+
 
 class TestPrepareFigureRepairSkip:
     """prepare_figure ueberspringt pymeshfix bei bereits intakten Meshes.

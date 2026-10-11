@@ -95,11 +95,10 @@ class TestBuildInlayManualOverrides:
             box_depth=1.0,
             box_height=1.0,
         )
-        # CSG kann hier fehlschlagen (zu wenig Ueberlapp) – wir fangen das ab.
-        try:
+        # A box that lies entirely inside the cavity leaves no material at all:
+        # the warning is followed by an error, not by an inlay.
+        with pytest.raises(ValueError, match="empty mesh"):
             inlayer.build_inlay(dilated_cube, cfg)
-        except (ValueError, RuntimeError):
-            pass
         captured = capsys.readouterr().out
         assert "WARN" in captured
         assert "smaller than the minimum" in captured
@@ -107,11 +106,10 @@ class TestBuildInlayManualOverrides:
 
 class TestBuildInlayInvalidGeometry:
     def test_empty_mesh_raises(self, fast_test_config):
-        # Leeres Mesh hat keine bounds -> Aufruf scheitert deterministisch.
-        # trimesh 4.x liefert bounds=None, was beim Unpacken einen TypeError gibt;
-        # alternative Implementierungen koennten ValueError werfen. Beide ok.
+        # build_inlay checks for it up front. Accepting a TypeError as well
+        # let that check be deleted: the same call then failed somewhere below.
         empty = trimesh.Trimesh()
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError, match="empty"):
             inlayer.build_inlay(empty, fast_test_config)
 
 
@@ -124,14 +122,16 @@ class TestBuildInlayOffsets:
         """
         plain = inlayer.build_inlay(dilated_cube, fast_test_config)
         moved = inlayer.build_inlay(
-            dilated_cube, dataclasses.replace(fast_test_config, offset_x=1.0, offset_z=-1.0)
+            dilated_cube,
+            dataclasses.replace(fast_test_config, offset_x=1.0, offset_y=0.5, offset_z=-1.0),
         )
         assert moved[1:] == pytest.approx(plain[1:], abs=1e-6)
         (before,) = gp.cavities(*plain)
         (after,) = gp.cavities(*moved)
         shift = np.array(after.bounding_box()) - np.array(before.bounding_box())
-        # x: whole pocket moves; z: the floor moves, the open top stays clipped
+        # x, y: whole pocket moves; z: the floor moves, the open top stays clipped
         np.testing.assert_allclose(shift[[0, 3]], 1.0, atol=1e-3)
+        np.testing.assert_allclose(shift[[1, 4]], 0.5, atol=1e-3)  # offset_y had no test at all
         assert shift[2] == pytest.approx(-1.0, abs=1e-3)
 
     def test_cutter_grid_is_bounded_too(self, dilated_cube, fast_test_config, monkeypatch):
@@ -195,17 +195,28 @@ class TestBuildInlayMultiMesh:
             assert lo[2] >= wall
             assert hi[2] > h  # stands out of the box by (1 - depth_fraction)
 
-    def test_build_inlay_individual_offsets(self, dilated_cube, dilated_sphere, fast_test_config):
-        """Prueft, ob individuelle Offsets pro Figur korrekt angewendet werden."""
-        offsets = [(0.0, 0.0, 0.0), (30.0, 40.0, 5.0)]
-        inlay, w, d, h = inlayer.build_inlay(
-            [dilated_cube, dilated_sphere],
-            fast_test_config,
-            individual_offsets=offsets,
-        )
-        assert isinstance(inlay, trimesh.Trimesh)
-        assert len(inlay.faces) > 0
-        assert w > 0 and d > 0 and h > 0
+    def test_individual_offsets_move_only_their_figure(self, dilated_cube, dilated_sphere, fast_test_config):
+        """One offset per figure, each applied to its own cavity. The test
+        this replaces asserted that the inlay had faces - with offsets that
+        pushed the second figure clean out of the box."""
+        cfg = dataclasses.replace(fast_test_config, layout_style="horizontal")
+        figs = [dilated_cube, dilated_sphere]
+        plain = inlayer.build_inlay(figs, cfg)
+        moved = inlayer.build_inlay(figs, cfg, individual_offsets=[(0.0, 0.0, 0.0), (0.5, 1.0, -1.0)])
+        assert moved[1:] == pytest.approx(plain[1:], abs=1e-6)  # the box stays put
+
+        def pockets(result):
+            """Bounds of the two pockets, in the order of the figures."""
+            centres = [fig.bounds.mean(axis=0) + place
+                       for fig, place in zip(figs, result[0].metadata["placements"])]
+            boxes = [np.array(c.bounding_box()) for c in gp.cavities(*result)]
+            return [min(boxes, key=lambda b: abs((b[0] + b[3]) / 2 - centre[0])) for centre in centres]
+
+        shift = np.array(pockets(moved)) - np.array(pockets(plain))
+        np.testing.assert_allclose(shift[0], 0.0, atol=1e-3)
+        np.testing.assert_allclose(shift[1][[0, 3]], 0.5, atol=1e-3)
+        np.testing.assert_allclose(shift[1][[1, 4]], 1.0, atol=1e-3)
+        assert shift[1][2] == pytest.approx(-1.0, abs=1e-3)  # the floor; the open top stays clipped
 
 
 class TestBuildInlayCylinder:
@@ -270,14 +281,13 @@ class TestBuildInlayCylinder:
             box_shape="cylinder",
             box_diameter=1.0,
         )
-        # CSG kann hier fehlschlagen (zu wenig Ueberlapp) – wir fangen das ab.
-        try:
-            inlayer.build_inlay(dilated_cube, cfg)
-        except (ValueError, RuntimeError):
-            pass
+        # The automatic height keeps a floor below the cavity, so a sliver of
+        # the cylinder remains: a warning and findings, not an error.
+        inlay, *_ = inlayer.build_inlay(dilated_cube, cfg)
         captured = capsys.readouterr().out
         assert "WARN" in captured
         assert "smaller than the minimum" in captured
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is False
 
     def test_cavity_reduces_volume(self, dilated_cube, fast_test_config):
         # Das Inlay muss weniger Volumen haben als der massive Zylinder
