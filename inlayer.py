@@ -1266,6 +1266,12 @@ def main(argv: list[str] | None = None) -> int:
         args.output if os.path.exists(args.output) else out_dir, os.W_OK
     ):
         parser.error(t_("cli.error.output_not_writable", path=args.output))
+    # The rotations are the only numbers that do not pass through Config and
+    # its checks: --rot-x nan ran the whole pipeline on a mesh of NaNs and
+    # wrote a solid block.
+    for name in ("rot_x", "rot_y", "rot_z"):
+        if not math.isfinite(getattr(args, name)):
+            parser.error(t_("config.must_be_finite", name=name, value=getattr(args, name)))
     # One recess position applies to every figure, otherwise one per input
     # file - only checked when recesses are on, the flag does nothing else.
     recess_positions = list(args.finger_recess_position)

@@ -392,6 +392,17 @@ class TestCLIErrors:
         assert "Cannot write the output file" in err
         assert "[1/4]" not in out
 
+    @pytest.mark.parametrize("flag", ["--rot-x", "--rot-y", "--rot-z"])
+    @pytest.mark.parametrize("value", ["nan", "inf"])
+    def test_rotation_must_be_finite(self, cube_stl_path, tmp_path, capsys, flag, value):
+        """The rotations bypass Config and with it the check every other number
+        gets: `--rot-x nan` ran to the end, wrote a solid block and exited 3."""
+        out_path = tmp_path / "inlay.stl"
+        code, out, err = run_main(capsys, "-i", cube_stl_path, "-o", out_path, flag, value, *FAST)
+        assert code == 2
+        assert f"{flag[2:].replace('-', '_')} must be a finite number" in err
+        assert "[1/4]" not in out and not out_path.exists()
+
     def test_unreadable_stl_exits_with_1(self, tmp_path, capsys):
         broken = tmp_path / "broken.stl"
         broken.write_bytes(np.random.default_rng(0).bytes(500))
