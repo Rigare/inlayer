@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import trimesh
 
+import i18n
 import inlayer
 
 
@@ -359,6 +360,147 @@ class TestCLI:
         assert result.returncode == 2
         assert message in result.stderr
         assert "Traceback" not in result.stderr
+
+
+def _signature(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Extents, volume and centre of mass of an inlay: whatever moves, resizes
+    or reshapes a cavity or the box shows in at least one of them."""
+    return np.concatenate([mesh.extents, [mesh.volume], mesh.center_mass])
+
+
+def _library_inlay(paths, rotation=(0.0, 0.0, 0.0), positions=None, **config) -> trimesh.Trimesh:
+    """The inlay the library builds for these files and this Config (at FAST's resolution)."""
+    cfg = inlayer.Config(**{"voxel_pitch": 1.0, "decimate_faces": 1000, **config})
+    figures = [
+        inlayer.apply_euler_rotation(inlayer.prepare_figure(path, cfg), *rotation) for path in paths
+    ]
+    dilated = [inlayer.dilate(fig, cfg.clearance, cfg) for fig in figures]
+    inlay, *_ = inlayer.build_inlay(
+        dilated, cfg, file_names=list(paths), individual_recess_positions=positions
+    )
+    return inlay
+
+
+# (flags, the Config they stand for, extras outside Config, which inputs)
+ONE, TWO, ROUND = ("bar",), ("bar", "cube"), ("sphere",)
+RECESSES = {"enable_finger_recesses": True}
+WIRING = [
+    (["-c", "2.0"], {"clearance": 2.0}, {}, ONE),
+    (["--clearance", "2.0"], {"clearance": 2.0}, {}, ONE),
+    (["-w", "3.0"], {"wall_thickness": 3.0}, {}, ONE),
+    (["--wall-thickness", "3.0"], {"wall_thickness": 3.0}, {}, ONE),
+    (["-df", "0.5"], {"depth_fraction": 0.5}, {}, ONE),
+    (["--depth-fraction", "0.5"], {"depth_fraction": 0.5}, {}, ONE),
+    (["-vp", "0.5"], {"voxel_pitch": 0.5}, {}, ONE),
+    (["--voxel-pitch", "0.5"], {"voxel_pitch": 0.5}, {}, ONE),
+    (["--decimate-faces", "60"], {"decimate_faces": 60}, {}, ROUND),
+    (["--scale", "2.0"], {"stl_unit_to_mm": 2.0}, {}, ONE),
+    (["--box-shape", "cylinder"], {"box_shape": "cylinder"}, {}, ONE),
+    (["--box-shape", "cylinder", "--box-diameter", "60"],
+     {"box_shape": "cylinder", "box_diameter": 60.0}, {}, ONE),
+    (["--box-width", "40"], {"box_width": 40.0}, {}, ONE),
+    (["--box-depth", "30"], {"box_depth": 30.0}, {}, ONE),
+    (["--box-height", "12"], {"box_height": 12.0}, {}, ONE),
+    (["--offset-x", "1.5"], {"offset_x": 1.5}, {}, ONE),
+    (["--offset-y", "1.5"], {"offset_y": 1.5}, {}, ONE),
+    (["--offset-z", "-1.0"], {"offset_z": -1.0}, {}, ONE),
+    (["--rot-x", "90"], {}, {"rotation": (90.0, 0.0, 0.0)}, ONE),
+    (["--rot-y", "90"], {}, {"rotation": (0.0, 90.0, 0.0)}, ONE),
+    (["--rot-z", "90"], {}, {"rotation": (0.0, 0.0, 90.0)}, ONE),
+    (["--figure-gap", "6"], {"figure_gap": 6.0}, {}, TWO),
+    (["--layout-style", "horizontal"], {"layout_style": "horizontal"}, {}, TWO),
+    (["--layout-style", "vertical"], {"layout_style": "vertical"}, {}, TWO),
+    (["--finger-recesses"], RECESSES, {}, ONE),
+    (["--finger-recesses", "--finger-radius", "4"], {**RECESSES, "finger_radius": 4.0}, {}, ONE),
+    (["--finger-recesses", "--finger-recess-axis", "y"],
+     {**RECESSES, "finger_recess_axis": "y"}, {}, ONE),
+    (["--finger-recesses", "--finger-recess-z-offset", "3"],
+     {**RECESSES, "finger_recess_z_offset": 3.0}, {}, ONE),
+    (["--finger-recesses", "--finger-radius", "3", "--finger-recess-position", "0.8"],
+     {**RECESSES, "finger_radius": 3.0}, {"positions": [0.8]}, ONE),
+    (["--finger-recesses", "--finger-radius", "3", "--finger-recess-position", "0.8", "-0.8"],
+     {**RECESSES, "finger_radius": 3.0}, {"positions": [0.8, -0.8]}, TWO),
+]
+
+
+class TestCLIWiring:
+    """Every flag reaches the pipeline, and the file written is that inlay.
+
+    The CLI tests asserted an exit code and a non-empty file. A CLI that
+    wrote the figure instead of the inlay, ignored its rotations or dropped
+    15 of the 21 arguments on the way into Config passed all of them.
+    """
+
+    @pytest.fixture
+    def inputs(self, bar_stl_path, cube_stl_path, sphere_stl_path):
+        return {"bar": bar_stl_path, "cube": cube_stl_path, "sphere": sphere_stl_path}
+
+    @staticmethod
+    def _written(capsys, tmp_path, paths, flags) -> trimesh.Trimesh:
+        out = tmp_path / "inlay.stl"
+        code, _, err = run_main(capsys, "-i", *paths, "-o", out, *FAST, *flags)
+        assert code in (0, inlayer.EXIT_CHECK_FAILED), err
+        return trimesh.load(str(out), force="mesh")
+
+    @pytest.mark.parametrize("which", [ONE, TWO, ROUND], ids=["one", "two", "sphere"])
+    def test_the_file_is_the_inlay_of_the_defaults(self, inputs, tmp_path, capsys, which):
+        paths = [inputs[name] for name in which]
+        written = self._written(capsys, tmp_path, paths, [])
+        assert written.is_watertight
+        np.testing.assert_allclose(
+            _signature(written), _signature(_library_inlay(paths)), rtol=1e-4, atol=2e-3
+        )
+
+    @pytest.mark.parametrize(
+        "flags,config,extras,which", WIRING, ids=[" ".join(case[0]) for case in WIRING]
+    )
+    def test_flag_gives_the_inlay_of_its_config(self, inputs, tmp_path, capsys, flags, config, extras, which):
+        paths = [inputs[name] for name in which]
+        expected = _signature(_library_inlay(paths, **extras, **config))
+        # The case has to bite: with the flag ignored the CLI writes this instead
+        untouched = _signature(_library_inlay(paths))
+        assert not np.allclose(expected, untouched, rtol=1e-4, atol=2e-3)
+        written = self._written(capsys, tmp_path, paths, flags)
+        np.testing.assert_allclose(_signature(written), expected, rtol=1e-4, atol=2e-3)
+
+    def test_parallel_builds_the_same_inlay(self, inputs, tmp_path, capsys):
+        paths = [inputs["bar"], inputs["cube"]]
+        out = tmp_path / "inlay.stl"
+        code, stdout, _ = run_main(capsys, "-i", *paths, "-o", out, *FAST, "--parallel")
+        assert code == 0
+        assert "Parallelising" in stdout  # the flag reached Config.enable_parallel
+        np.testing.assert_allclose(
+            _signature(trimesh.load(str(out), force="mesh")), _signature(_library_inlay(paths)),
+            rtol=1e-4, atol=2e-3,
+        )
+
+
+class TestCLILanguage:
+    """--lang and INLAYER_LANG are read before the parser exists (its help
+    texts are translated while it is built). No test ran the CLI in anything
+    but the pinned English: deleting that line changed nothing in the suite."""
+
+    def test_flag_translates_the_help(self, capsys):
+        code, out, _ = run_main(capsys, "--lang", "de", "--help")
+        assert code == 0
+        assert i18n.TRANSLATIONS["cli.description"]["de"] in " ".join(out.split())
+
+    def test_flag_translates_the_run(self, cube_stl_path, tmp_path, capsys):
+        code, out, _ = run_main(capsys, "--lang", "de", "-i", cube_stl_path, "-o", tmp_path / "i.stl", *FAST)
+        assert code == 0
+        assert i18n.TRANSLATIONS["cli.step2"]["de"] in out
+
+    def test_environment_sets_the_language(self, cube_stl_path, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv(i18n.ENV_VAR, "de_CH.UTF-8")
+        code, out, _ = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / "i.stl", *FAST)
+        assert code == 0
+        assert i18n.TRANSLATIONS["cli.step2"]["de"] in out
+
+    def test_flag_beats_the_environment(self, capsys, monkeypatch):
+        monkeypatch.setenv(i18n.ENV_VAR, "de")
+        code, out, _ = run_main(capsys, "--lang", "en", "--help")
+        assert code == 0
+        assert i18n.TRANSLATIONS["cli.description"]["en"] in " ".join(out.split())
 
 
 class TestCLIDefaults:

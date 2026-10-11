@@ -16,7 +16,7 @@ High-signal context for OpenCode sessions in this repo.
 
 ## Testing
 
-- A `pytest` suite lives in `tests/` (config validation, each pipeline step, `app_helpers`, end-to-end, CLI). Run with `pytest` (full suite ~70 s) or `pytest -m "not slow"` to skip subprocess/CLI tests and the finest-pitch geometry runs.
+- A `pytest` suite lives in `tests/` (config validation, each pipeline step, `app_helpers`, end-to-end, CLI). Run with `pytest` (full suite ~70 s) or `pytest -m "not slow"` to skip the subprocess tests and the finest-pitch geometry runs. The CLI itself is tested in-process through `inlayer.main(argv)` and stays in the quick loop: `tests/test_pipeline.py::TestCLIWiring` holds every flag against the inlay the library builds for the matching `Config` and reads back the STL the CLI wrote. A new flag gets a row in its `WIRING` table - an exit code and a non-empty file prove nothing about what was written.
 - **Never test a re-implementation of shipped code.** If a helper is hard to import, move it somewhere importable (see `app_helpers.py`) instead of copying its body into the test file — a copied test passes even when the real function is broken.
 - **After every code change, run the tests.** If the suite fails, fix the regression before considering the change done.
 - **Extend the suite when you add or modify behavior.** New functions, new branches, new edge cases or bug fixes must come with matching tests. Keep test docstrings and comments in English per the language convention below.

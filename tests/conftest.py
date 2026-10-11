@@ -72,6 +72,15 @@ def sphere_stl_path(tmp_path_factory, sphere_mesh) -> str:
 
 
 @pytest.fixture(scope="session")
+def bar_stl_path(tmp_path_factory) -> str:
+    """A 20 x 6 x 4 mm bar: unlike cube and sphere it shows which way it was
+    turned and along which axis something happened to it."""
+    p = tmp_path_factory.mktemp("meshes") / "bar.stl"
+    trimesh.creation.box(extents=[20.0, 6.0, 4.0]).export(file_obj=str(p), file_type="stl")
+    return str(p)
+
+
+@pytest.fixture(scope="session")
 def fast_test_config():
     """Schnelle Konfiguration: groesserer voxel_pitch reduziert Laufzeit signifikant."""
     import inlayer

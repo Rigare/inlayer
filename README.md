@@ -276,7 +276,8 @@ pip install -r requirements-dev.txt
 # Full suite (~70 s)
 pytest
 
-# Faster: skips end-to-end / CLI runs and the finest-pitch geometry checks
+# Faster: skips the tests that start the CLI as a subprocess and the
+# finest-pitch geometry checks (the CLI's flags are still tested, in-process)
 pytest -m "not slow"
 
 # A single file or test
