@@ -25,4 +25,13 @@ services:
       # Startup language of this instance. Without a value the app starts in
       # English; it can still be switched per session in the sidebar.
       - INLAYER_LANG=de
+    # Upper bounds for what one container may take from the host. Every run
+    # voxelizes its figures in memory (about 0.5 GB for a 60 mm figure at the
+    # default resolution, 1.3 GB for 100 mm, more with a finer pitch or several
+    # sessions at once), and anyone who can reach the port can start one.
+    # Without a limit a large upload takes the whole host down instead of this
+    # container; with it the kernel stops the container and it restarts.
+    # Adjust to the machine, e.g. `INLAYER_MEM_LIMIT=8g docker compose up`.
+    mem_limit: ${INLAYER_MEM_LIMIT:-4g}
+    cpus: ${INLAYER_CPUS:-4}
     restart: unless-stopped

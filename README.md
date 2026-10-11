@@ -146,6 +146,15 @@ without editing `compose.yaml`:
 STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500 docker compose up --build
 ```
 
+`compose.yaml` also caps what the container may take from the host: 4 GB of
+memory and 4 CPUs. A run that needs more is stopped by the kernel and the
+container restarts, instead of the whole machine running out of memory. Set the
+limits to fit your host the same way:
+
+```bash
+INLAYER_MEM_LIMIT=8g INLAYER_CPUS=8 docker compose up --build
+```
+
 The `./data` volume in `compose.yaml` exists purely for **CLI use inside the
 container**:
 
