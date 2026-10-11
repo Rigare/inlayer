@@ -206,9 +206,12 @@ class TestTranslate:
         assert "3" in out and "{n}" not in out
 
     def test_missing_placeholder_does_not_raise(self):
-        """Ein vergessenes kwarg darf die Pipeline nicht abbrechen."""
-        out = i18n.t("app.upload.multi_info")
-        assert isinstance(out, str)
+        """A forgotten kwarg must not abort a running computation: the text
+        comes back unformatted. (Called without any kwarg, as this test used
+        to, t() does not format at all and never reaches that fallback.)"""
+        i18n.set_language("en")
+        out = i18n.t("check.side", name="a.stl")  # measured and target are missing
+        assert out == i18n.TRANSLATIONS["check.side"]["en"]
 
     def test_surplus_kwargs_are_ignored(self):
         out = i18n.t("app.language.label", unbenutzt=1)

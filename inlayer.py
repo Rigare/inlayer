@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import argparse
 import io
 import math
 import sys
@@ -31,7 +32,7 @@ import i18n
 from i18n import t as t_
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields
-from typing import Callable, Final, Any, Iterable, TypeVar, cast
+from typing import Callable, Final, Any, Iterable, Iterator, TypeVar, cast
 from manifold3d import Manifold, Mesh, OpType
 from scipy.ndimage import (
     binary_closing,
@@ -322,13 +323,15 @@ def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.T
     trimesh does not raise on an empty or garbled STL - it returns a mesh
     without triangles, and the pipeline then fails far away with a cryptic
     'NoneType' error. Uploads are untrusted input, so any file that yields no
-    triangles is rejected here with a message that names it.
+    triangles is rejected here with a message that names it. So is a file
+    whose coordinates are all NaN or infinite: trimesh drops every vertex and
+    keeps the faces, and the first look at the bounds raised an IndexError.
     """
     try:
         mesh = trimesh.load(source, file_type=file_type, force="mesh")
     except Exception as exc:
         raise ValueError(t_("error.empty_input", name=name)) from exc
-    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0 or len(mesh.vertices) == 0:
         raise ValueError(t_("error.empty_input", name=name))
     return mesh
 
@@ -338,6 +341,12 @@ def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.T
 # scipy's morphology holds several copies of it. Without the bound a small
 # upload scaled up (or a tiny STL with a huge bounding box) takes down a shared
 # web-app container instead of failing with a message.
+#
+# Checked wherever a grid is built, on the mesh that is voxelized there:
+# prepare_figure (early, before the repair), dilate (the rotated figure plus
+# its padding) and _solidify_figure (the cutter up to the box's top face).
+# Checking the upload alone let a rotation through: a 1 m rod of 16 mm passes
+# with 3e7 voxels and needs 2.6e10 once it is turned onto the space diagonal.
 MAX_GRID_VOXELS: Final[int] = 1_000_000_000
 
 # Sample spacing of `_voxelize_surface`, as a fraction of the pitch. Samples
@@ -348,13 +357,19 @@ MAX_GRID_VOXELS: Final[int] = 1_000_000_000
 # subdivision voxelizer gives with its pitch / 2 edge limit.
 _SURFACE_SAMPLE_SPACING: Final[float] = 0.4
 
+# `_voxelize_surface` never holds more than this many triangles, rows or sample
+# points at a time (roughly 200 bytes each across the arrays of one batch), so
+# its memory stays flat however large or finely tessellated the mesh is. All
+# samples at once cost gigabytes for a figure of 60 mm.
+_SURFACE_SAMPLE_BATCH: Final[int] = 100_000
 
-def _check_grid_size(extents: np.ndarray, pitch: float, name: str) -> None:
+
+def _check_grid_size(extents: Any, pitch: float, name: str | None) -> None:
     """Refuses a figure whose voxel grid at `pitch` would exceed MAX_GRID_VOXELS."""
-    voxels = float(np.prod(np.ceil(np.asarray(extents) / pitch) + 1))
+    voxels = float(np.prod(np.ceil(np.asarray(extents, dtype=float) / pitch) + 1))
     if voxels > MAX_GRID_VOXELS:
-        raise ValueError(t_("error.grid_too_large", name=name, voxels=f"{voxels:.1e}",
-                            limit=f"{MAX_GRID_VOXELS:.1e}"))
+        raise ValueError(t_("error.grid_too_large", name=name or t_("error.unnamed_figure"),
+                            voxels=f"{voxels:.1e}", limit=f"{MAX_GRID_VOXELS:.1e}"))
 
 
 def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -367,13 +382,20 @@ def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
     return np.where(t == 1.0, r, p + t * (r - p))
 
 
-def _segment_points(p0: np.ndarray, p1: np.ndarray, spacing: float) -> np.ndarray:
-    """Evenly spaced points on each segment p0[i]-p1[i], endpoints included."""
+def _segment_batches(p0: np.ndarray, p1: np.ndarray, spacing: float) -> Iterator[np.ndarray]:
+    """Evenly spaced points on each segment p0[i]-p1[i], endpoints included.
+
+    Yields them in batches of at most _SURFACE_SAMPLE_BATCH points; a batch may
+    end in the middle of a segment, so one very long segment is no exception.
+    """
     count = np.ceil(np.linalg.norm(p1 - p0, axis=1) / spacing).astype(np.int64) + 1
-    seg = np.repeat(np.arange(len(p0)), count)
-    step = np.arange(len(seg)) - np.repeat(np.cumsum(count) - count, count)
-    q = step / np.maximum(count[seg] - 1, 1)
-    return _lerp(p0[seg], p1[seg], q[:, None])
+    first = np.cumsum(count) - count  # index of each segment's first point
+    total = int(count.sum())
+    for begin in range(0, total, _SURFACE_SAMPLE_BATCH):
+        k = np.arange(begin, min(begin + _SURFACE_SAMPLE_BATCH, total))
+        seg = np.searchsorted(first, k, side="right") - 1
+        q = (k - first[seg]) / np.maximum(count[seg] - 1, 1)
+        yield _lerp(p0[seg], p1[seg], q[:, None])
 
 
 def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
@@ -383,56 +405,90 @@ def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
     shorter than pitch / 2: a long, thin triangle (CAD exports of rods, pins,
     profiles) costs (length / pitch)² sub-triangles however little area it has.
     A 256-triangle rod of 40 mm took 1.95 GB, a 12-triangle 250 mm bar aborted
-    with "max_iter exceeded". Here each triangle is sampled in rows parallel to
-    its longest edge instead, plus its three edges; see _SURFACE_SAMPLE_SPACING
-    for why the shell stays closed. Only for raw input meshes - the later steps
-    voxelize marching-cubes output whose edges are about one pitch long.
+    with "max_iter exceeded" - and on a fine mesh every triangle is still split
+    into 16 or 64, which made dilate the memory peak of a whole run. Here each
+    triangle is sampled in rows parallel to its longest edge instead, plus its
+    three edges; see _SURFACE_SAMPLE_SPACING for why the shell stays closed.
+
+    The samples are marked batch by batch (_SURFACE_SAMPLE_BATCH), so beyond
+    the grid itself the memory does not depend on the mesh.
     """
-    tri = mesh.triangles
-    n = len(tri)
+    if len(mesh.faces) == 0:
+        raise ValueError(t_("error.empty_meshes"))
     spacing = _SURFACE_SAMPLE_SPACING * pitch
-    lengths = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2)
-    # Rotate every triangle so that a-b is its longest edge: the apex c then
-    # projects onto a-b, so every row parallel to a-b stays inside the triangle.
-    order = (lengths.argmax(axis=1)[:, None] + np.arange(3)) % 3
-    a, b, c = (tri[np.arange(n), order[:, k]] for k in range(3))
-    longest = lengths.max(axis=1)
-    height = np.linalg.norm(np.cross(b - a, c - a), axis=1) / np.maximum(longest, 1e-12)
+    # One voxel of margin: an interior sample may land an ulp outside the
+    # vertices' range. The grid is cropped to the voxels actually hit below.
+    low = np.floor(mesh.bounds[0] / pitch).astype(np.int64) - 1
+    high = np.ceil(mesh.bounds[1] / pitch).astype(np.int64) + 1
+    matrix = np.zeros(high - low + 1, dtype=bool)
 
-    n_rows = np.ceil(height / spacing).astype(np.int64) + 1
-    row_tri = np.repeat(np.arange(n), n_rows)
-    row = np.arange(len(row_tri)) - np.repeat(np.cumsum(n_rows) - n_rows, n_rows)
-    s = (row / np.maximum(n_rows[row_tri] - 1, 1))[:, None]
-    ra, rb, rc = a[row_tri], b[row_tri], c[row_tri]
-    points = np.concatenate([
-        _segment_points(_lerp(ra, rc, s), _lerp(rb, rc, s), spacing),
-        _segment_points(b, c, spacing),
-        _segment_points(c, a, spacing),
-    ])
+    def mark(p0: np.ndarray, p1: np.ndarray) -> None:
+        for points in _segment_batches(p0, p1, spacing):
+            # Same rounding as trimesh.voxel.creation.voxelize_subdivide
+            hit = np.round(points / pitch).astype(np.int64) - low
+            matrix[hit[:, 0], hit[:, 1], hit[:, 2]] = True
 
-    # Same rounding as trimesh.voxel.creation.voxelize_subdivide
-    hit = np.round(points / pitch).astype(np.int64)
-    origin = hit.min(axis=0)
-    matrix = np.zeros(hit.max(axis=0) - origin + 1, dtype=bool)
-    matrix[tuple((hit - origin).T)] = True
+    vertices, faces = mesh.vertices, mesh.faces
+    for block in range(0, len(faces), _SURFACE_SAMPLE_BATCH):
+        tri = vertices[faces[block:block + _SURFACE_SAMPLE_BATCH]]
+        n = len(tri)
+        lengths = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2)
+        # Rotate every triangle so that a-b is its longest edge: the apex c then
+        # projects onto a-b, so every row parallel to a-b stays inside the triangle.
+        order = (lengths.argmax(axis=1)[:, None] + np.arange(3)) % 3
+        a, b, c = (tri[np.arange(n), order[:, k]] for k in range(3))
+        longest = lengths.max(axis=1)
+        height = np.linalg.norm(np.cross(b - a, c - a), axis=1) / np.maximum(longest, 1e-12)
+        n_rows = np.ceil(height / spacing).astype(np.int64) + 1
+        mark(b, c)
+        mark(c, a)
+
+        # The rows of as many triangles at a time as fit the batch size (a
+        # single tall triangle may exceed it; its rows are bounded by the grid)
+        rows_through = np.cumsum(n_rows)
+        i = 0
+        while i < n:
+            done = int(rows_through[i - 1]) if i else 0
+            j = max(i + 1, int(np.searchsorted(
+                rows_through, done + _SURFACE_SAMPLE_BATCH, side="right")))
+            rows = n_rows[i:j]
+            row_tri = np.repeat(np.arange(i, j), rows)
+            row = np.arange(len(row_tri)) - np.repeat(rows_through[i:j] - rows - done, rows)
+            s = (row / np.maximum(n_rows[row_tri] - 1, 1))[:, None]
+            ra, rb, rc = a[row_tri], b[row_tri], c[row_tri]
+            mark(_lerp(ra, rc, s), _lerp(rb, rc, s))
+            i = j
+
+    used = [np.flatnonzero(matrix.any(axis=tuple(k for k in range(3) if k != axis)))
+            for axis in range(3)]
+    origin = low + np.array([u[0] for u in used])
+    matrix = matrix[tuple(slice(u[0], u[-1] + 1) for u in used)]
     transform = trimesh.transformations.scale_and_translate(
         scale=pitch, translate=origin * pitch
     )
     return cast(Any, trimesh.voxel.VoxelGrid)(matrix, transform=transform)
 
 
-def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
-    """Loads, repairs, decimates and smooths an input figure."""
+def prepare_figure(
+    path: str, config: Config = _DEFAULT_CFG, name: str | None = None
+) -> trimesh.Trimesh:
+    """Loads, repairs, decimates and smooths an input figure.
+
+    `name` is what log lines and errors call the file - by default its path.
+    The web app reads uploads from temporary files: a message about
+    /tmp/tmpk3x9.stl tells the user nothing about which of their files it means.
+    """
     if not os.path.isfile(path):
         raise FileNotFoundError(t_("error.input_not_found", path=path))
+    name = name or path
 
     t = time.perf_counter()
-    _log(t_("pipeline.load", path=path))
-    m = load_mesh(path, name=path)
+    _log(t_("pipeline.load", path=name))
+    m = load_mesh(path, name=name)
     if config.stl_unit_to_mm != 1.0:
         m.apply_scale(config.stl_unit_to_mm)
     _log(t_("pipeline.loaded", faces=i18n.format_int(len(m.faces)), extents=m.extents.round(2)), t)
-    _check_grid_size(m.extents, config.voxel_pitch / 2, name=path)
+    _check_grid_size(m.extents, config.voxel_pitch / 2, name=name)
 
     # Repair only when there is something to repair. pymeshfix is the most
     # expensive single step before voxelization (measured ~30 % of
@@ -452,6 +508,10 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         # part survived depended on an unrelated hole anywhere in the file.
         mf.repair(remove_smallest_components=False)
         m = trimesh.Trimesh(vertices=mf.points, faces=mf.faces)
+        if len(m.faces) == 0:
+            # Nothing that could be closed into a solid: a flat surface, or
+            # triangles collapsed to a line or a point
+            raise ValueError(t_("error.not_solid", name=name))
         _log(t_("pipeline.repaired", faces=i18n.format_int(len(m.faces))), t)
 
     t = _log(t_("pipeline.decimate", target=i18n.format_int(config.decimate_faces)))
@@ -510,7 +570,8 @@ _CUBE: Final = np.ones((3, 3, 3), dtype=bool)
 
 
 def dilate(
-    mesh: trimesh.Trimesh, distance: float, config: Config = _DEFAULT_CFG
+    mesh: trimesh.Trimesh, distance: float, config: Config = _DEFAULT_CFG,
+    name: str | None = None,
 ) -> trimesh.Trimesh:
     """Tolerance offset via voxel dilation (more robust than a normal shift).
 
@@ -521,14 +582,19 @@ def dilate(
     configured one. Flip side: it cannot drop below ~0.75 * voxel_pitch
     (iters >= 0). The dilation is close to isotropic, so slopes and curves get
     the same clearance as axis-parallel faces (see _CUBE_STEP_SHARE).
+
+    `name` is what an error calls the figure (its file name).
     """
     pitch = config.voxel_pitch / 2
+    iters = _dilation_iterations(distance, config)
+    # The mesh arrives rotated, so its grid can be far larger than the one
+    # prepare_figure checked - plus the padding for the dilation itself.
+    _check_grid_size(mesh.extents + 2 * iters * pitch, pitch, name)
+
     t = _log(t_("pipeline.voxelize_dilation", pitch=pitch))
-    vox = cast(Any, mesh.voxelized(pitch=pitch))
+    vox = _voxelize_surface(mesh, pitch)
     vox.fill()
     _log(t_("pipeline.grid_ready"), t)
-
-    iters = _dilation_iterations(distance, config)
 
     if iters > 0:
         # Pad by 'iters' on every side: both structuring elements grow at most
@@ -646,7 +712,7 @@ def _to_trimesh(manifold: Manifold) -> trimesh.Trimesh:
 
 
 def _solidify_figure(
-    fig: trimesh.Trimesh, config: Config, top_z: float,
+    fig: trimesh.Trimesh, config: Config, top_z: float, name: str | None = None,
 ) -> trimesh.Trimesh:
     """Solidifies a figure from its underside up to `top_z` (no undercuts).
 
@@ -657,7 +723,11 @@ def _solidify_figure(
     Z offset, a short figure lowered by hand): the print had a closed void.
     """
     pitch = config.voxel_pitch
-    sol_vox = cast(Any, fig.voxelized(pitch=pitch))
+    lo, hi = fig.bounds
+    # The grid reaches from the figure's underside up to top_z, however far a
+    # manual Z offset has pushed that.
+    _check_grid_size([hi[0] - lo[0], hi[1] - lo[1], max(hi[2], top_z) - lo[2]], pitch, name)
+    sol_vox = _voxelize_surface(fig, pitch)
     matrix = sol_vox.matrix
     # Extend the grid upwards only - the origin sits at the bottom, so the
     # transform stays valid (no _padded_transform: the padding is one-sided).
@@ -872,9 +942,9 @@ def build_inlay(
                    dtype=float)
         for i in range(n)
     ]
+    names = [entry(file_names, i, None) for i in range(n)]
     labels = [
-        f" '{file_names[i]}'" if file_names is not None and i < len(file_names)
-        else (f" ({i + 1}/{n})" if multi else "")
+        f" '{names[i]}'" if names[i] is not None else (f" ({i + 1}/{n})" if multi else "")
         for i in range(n)
     ]
 
@@ -893,7 +963,9 @@ def build_inlay(
         t = _log(t_("pipeline.solidify", label=labels[i]))
         # The Z offset is applied afterwards; fill far enough that the cavity
         # still reaches past the top face once it has moved.
-        solid = _solidify_figure(local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2])
+        solid = _solidify_figure(
+            local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2], name=names[i]
+        )
         _log(t_("pipeline.solidified", faces=i18n.format_int(len(solid.faces))), t)
         return solid
 
@@ -922,7 +994,8 @@ def build_inlay(
     )
     corners = arrange_footprints(
         hi[:, :2] - lo[:, :2], config.effective_figure_gap, config.layout_style,
-        sort_keys, config.box_width, margin=wall,
+        # A cylinder has no width to fill: box_width is the cuboid's alone
+        sort_keys, config.box_width if config.box_shape == "box" else None, margin=wall,
     )
     slots = np.zeros((n, 3))
     slots[:, :2] = corners - lo[:, :2]
@@ -1037,6 +1110,10 @@ def wall_thickness_stats_3d(inlay: trimesh.Trimesh) -> dict:
 # on a usage error, and a script must be able to tell the two apart.
 EXIT_CHECK_FAILED: Final[int] = 3
 
+# Exit code of the CLI when the run itself fails (an unreadable STL, a grid
+# beyond MAX_GRID_VOXELS, no memory): one line on stderr, no inlay written.
+EXIT_FAILED: Final[int] = 1
+
 
 def describe_violation(violation: dict, names: list[str]) -> str:
     """One readable line per wall-check finding, naming the figure(s)."""
@@ -1051,18 +1128,8 @@ def describe_violation(violation: dict, names: list[str]) -> str:
 
 
 # --- CLI --------------------------------------------------------------------
-if __name__ == "__main__":
-    import argparse
-
-    # Die Sprache muss vor dem Parserbau feststehen: argparse wertet die
-    # Hilfetexte schon beim Hinzufuegen der Argumente aus, ein spaeter
-    # geparstes --lang kaeme dafuer zu spaet. Deshalb wird die Option vorab aus
-    # sys.argv gefischt; ohne Angabe entscheidet INLAYER_LANG.
-    _pre = argparse.ArgumentParser(add_help=False)
-    _pre.add_argument("--lang", choices=sorted(i18n.LANGUAGES))
-    _pre_args, _ = _pre.parse_known_args()
-    i18n.set_language(_pre_args.lang or i18n.language_from_env())
-
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI's argument parser, its help texts in the current language."""
     parser = argparse.ArgumentParser(description=t_("cli.description"))
     parser.add_argument(
         "--lang", choices=sorted(i18n.LANGUAGES), default=None,
@@ -1102,36 +1169,36 @@ if __name__ == "__main__":
         help=t_("cli.scale", default=Config.stl_unit_to_mm)
     )
     parser.add_argument(
-        "--box-shape", choices=["box", "cylinder"], default="box",
-        help=t_("cli.box_shape")
+        "--box-shape", choices=["box", "cylinder"], default=Config.box_shape,
+        help=t_("cli.box_shape", default=Config.box_shape)
     )
     parser.add_argument(
-        "--box-diameter", type=float, default=None,
+        "--box-diameter", type=float, default=Config.box_diameter,
         help=t_("cli.box_diameter")
     )
     parser.add_argument(
-        "--box-width", type=float, default=None,
+        "--box-width", type=float, default=Config.box_width,
         help=t_("cli.box_width")
     )
     parser.add_argument(
-        "--box-depth", type=float, default=None,
+        "--box-depth", type=float, default=Config.box_depth,
         help=t_("cli.box_depth")
     )
     parser.add_argument(
-        "--box-height", type=float, default=None,
+        "--box-height", type=float, default=Config.box_height,
         help=t_("cli.box_height")
     )
     parser.add_argument(
-        "--offset-x", type=float, default=0.0,
-        help=t_("cli.offset_x")
+        "--offset-x", type=float, default=Config.offset_x,
+        help=t_("cli.offset_x", default=Config.offset_x)
     )
     parser.add_argument(
-        "--offset-y", type=float, default=0.0,
-        help=t_("cli.offset_y")
+        "--offset-y", type=float, default=Config.offset_y,
+        help=t_("cli.offset_y", default=Config.offset_y)
     )
     parser.add_argument(
-        "--offset-z", type=float, default=0.0,
-        help=t_("cli.offset_z")
+        "--offset-z", type=float, default=Config.offset_z,
+        help=t_("cli.offset_z", default=Config.offset_z)
     )
     parser.add_argument(
         "--rot-x", type=float, default=0.0,
@@ -1146,12 +1213,13 @@ if __name__ == "__main__":
         help=t_("cli.rot_z")
     )
     parser.add_argument(
-        "--figure-gap", type=float, default=None,
+        "--figure-gap", type=float, default=Config.figure_gap,
         help=t_("cli.figure_gap")
     )
     parser.add_argument(
-        "--layout-style", choices=["compact", "horizontal", "vertical"], default="compact",
-        help=t_("cli.layout_style")
+        "--layout-style", choices=["compact", "horizontal", "vertical"],
+        default=Config.layout_style,
+        help=t_("cli.layout_style", default=Config.layout_style)
     )
     parser.add_argument(
         "--finger-recesses", action="store_true",
@@ -1163,15 +1231,16 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--finger-recess-axis", choices=["x", "y"], default=Config.finger_recess_axis,
-        help=t_("cli.finger_recess_axis")
+        help=t_("cli.finger_recess_axis", default=Config.finger_recess_axis)
     )
     parser.add_argument(
         "--finger-recess-z-offset", type=float, default=Config.finger_recess_z_offset,
         help=t_("cli.finger_recess_z_offset", default=Config.finger_recess_z_offset)
     )
     parser.add_argument(
-        "--finger-recess-position", type=float, nargs="+",
-        default=[Config.finger_recess_position],
+        # None rather than the default value: main() has to tell "not given"
+        # from "given as 0.0" to say when the flag has no effect
+        "--finger-recess-position", type=float, nargs="+", default=None,
         metavar="P",
         help=t_("cli.finger_recess_position", default=Config.finger_recess_position)
     )
@@ -1179,26 +1248,62 @@ if __name__ == "__main__":
         "--parallel", action="store_true",
         help=t_("cli.parallel", workers=MAX_PARALLEL_WORKERS)
     )
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    """Runs the CLI on `argv` (default: sys.argv[1:]) and returns its exit code.
+
+    Usage errors leave through argparse with SystemExit(2). A function rather
+    than code under `__main__`, so the tests can run the entry point in-process
+    and measure what it writes.
+    """
+    # The language has to be known before the parser is built: argparse
+    # evaluates the help texts while the arguments are added, a --lang parsed
+    # later would come too late for them. So the option is fished out of argv
+    # up front; without it INLAYER_LANG decides.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", choices=sorted(i18n.LANGUAGES))
+    pre_args, _ = pre.parse_known_args(argv)
+    i18n.set_language(pre_args.lang or i18n.language_from_env())
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     input_paths = args.input
 
     # Everything that can be rejected is rejected here, before minutes of
     # voxel work: argparse then prints a usage error instead of a traceback.
+    for path in input_paths:
+        if not os.path.isfile(path):
+            parser.error(t_("error.input_not_found", path=path))
+    # The inlay is written after all the work is done - a typo in the output
+    # directory used to cost the whole run.
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    if os.path.isdir(args.output) or not os.path.isdir(out_dir) or not os.access(
+        args.output if os.path.exists(args.output) else out_dir, os.W_OK
+    ):
+        parser.error(t_("cli.error.output_not_writable", path=args.output))
+    # The rotations are the only numbers that do not pass through Config and
+    # its checks: --rot-x nan ran the whole pipeline on a mesh of NaNs and
+    # wrote a solid block.
+    for name in ("rot_x", "rot_y", "rot_z"):
+        if not math.isfinite(getattr(args, name)):
+            parser.error(t_("config.must_be_finite", name=name, value=getattr(args, name)))
     # One recess position applies to every figure, otherwise one per input
     # file - only checked when recesses are on, the flag does nothing else.
-    recess_positions = list(args.finger_recess_position)
+    recess_positions = args.finger_recess_position or [Config.finger_recess_position]
     for value in recess_positions:
         if not -1.0 <= value <= 1.0:
             parser.error(t_("config.bad_finger_position", value=value))
     if len(recess_positions) == 1:
         recess_positions = recess_positions * len(input_paths)
-    elif len(recess_positions) != len(input_paths):
-        if args.finger_recesses:
-            parser.error(
-                t_("cli.error.recess_position_count",
-                   given=len(recess_positions), n=len(input_paths))
-            )
+    elif args.finger_recesses and len(recess_positions) != len(input_paths):
+        parser.error(
+            t_("cli.error.recess_position_count",
+               given=len(recess_positions), n=len(input_paths))
+        )
+    if args.finger_recess_position is not None and not args.finger_recesses:
+        # Whatever was passed - the note used to appear for a wrong count only
         print(t_("cli.recess_position_ignored"))
     try:
         config = Config(
@@ -1235,28 +1340,36 @@ if __name__ == "__main__":
              else t_("cli.label.figure"))
     print(t_("cli.step1", label=label))
 
-    prepared = _parallel_map(
-        lambda p: prepare_figure(p, config), input_paths, config,
-        what=t_("pipeline.what.prepare"),
-    )
-    rotated = [
-        apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
-    ]
+    try:
+        prepared = _parallel_map(
+            lambda p: prepare_figure(p, config), input_paths, config,
+            what=t_("pipeline.what.prepare"),
+        )
+        rotated = [
+            apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
+        ]
 
-    # Step 2: tolerance offset per figure (optionally in parallel)
-    print(t_("cli.step2"))
-    dilated_meshes = _parallel_map(
-        lambda fig: dilate(fig, config.clearance, config),
-        rotated, config, what=t_("pipeline.what.dilate"),
-    )
+        # Step 2: tolerance offset per figure (optionally in parallel)
+        print(t_("cli.step2"))
+        dilated_meshes = _parallel_map(
+            lambda item: dilate(item[0], config.clearance, config, name=item[1]),
+            zip(rotated, input_paths), config, what=t_("pipeline.what.dilate"),
+        )
 
-    # Step 3: arrange, cut and check (build_inlay does all three)
-    print(t_("cli.step3"))
-    inlay, box_w, box_d, box_h = build_inlay(
-        dilated_meshes, config, file_names=input_paths,
-        individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
-    )
-    inlay.export(file_obj=args.output, file_type="stl")
+        # Step 3: arrange, cut and check (build_inlay does all three)
+        print(t_("cli.step3"))
+        inlay, box_w, box_d, box_h = build_inlay(
+            dilated_meshes, config, file_names=input_paths,
+            individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
+        )
+        inlay.export(file_obj=args.output, file_type="stl")
+    except (ValueError, RuntimeError, OSError, MemoryError) as exc:
+        # What the pipeline raises on purpose names the file and the remedy.
+        # A traceback on top of it buried that one line; anything else is a
+        # bug and still shows its traceback.
+        reason = t_("error.out_of_memory") if isinstance(exc, MemoryError) else exc
+        print(t_("cli.error.failed", error=reason), file=sys.stderr)
+        return EXIT_FAILED
     print(t_("cli.saved", path=args.output))
 
     # Step 4: wall check
@@ -1274,6 +1387,8 @@ if __name__ == "__main__":
         print(t_("cli.check_failed", path=args.output, code=EXIT_CHECK_FAILED))
 
     print("\n" + t_("cli.total_time", seconds=f"{time.perf_counter() - t_total:.1f}"))
-    if not stats_3d["passes_min_wall"]:
-        sys.exit(EXIT_CHECK_FAILED)
+    return 0 if stats_3d["passes_min_wall"] else EXIT_CHECK_FAILED
 
+
+if __name__ == "__main__":
+    sys.exit(main())

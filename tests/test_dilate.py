@@ -58,6 +58,65 @@ class TestDilateConfig:
         assert isinstance(m, trimesh.Trimesh)
         assert len(m.faces) > 0
 
+
+
+class TestMemory:
+    """dilate and the cutters voxelize what marching cubes produced, at half
+    the pitch at that: trimesh's voxelizer split every triangle into 64 for it.
+    dilate was the memory peak of a whole run - 950 MB for this 30 mm cube,
+    3.8 GB for one of 60 mm, more than 10 GB for one of 100 mm."""
+
+    @staticmethod
+    def _peak_mb(fn) -> float:
+        import tracemalloc
+
+        tracemalloc.start()
+        fn()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return peak / 1024**2
+
+    def test_default_run_stays_near_the_grid(self, tmp_path):
+        cfg = Config()
+        path = tmp_path / "cube30.stl"
+        trimesh.creation.box(extents=[30.0, 30.0, 30.0]).export(file_obj=str(path), file_type="stl")
+        prepared = inlayer.prepare_figure(str(path), cfg)
+        dilated = []
+        assert self._peak_mb(lambda: dilated.append(inlayer.dilate(prepared, cfg.clearance, cfg))) < 200
+        # build_inlay voxelizes the dilated figure once more for its cutter (260 MB)
+        assert self._peak_mb(lambda: inlayer.build_inlay(dilated[0], cfg)) < 150
+
+
+class TestGridLimit:
+    """The grid bound is checked on the mesh dilate voxelizes, not on the upload.
+
+    prepare_figure sees a figure before it is rotated: a thin rod passed with
+    a few thousand voxels and then filled a grid hundreds of times larger once
+    it had been turned onto the space diagonal.
+    """
+
+    @pytest.fixture
+    def small_limit(self, monkeypatch):
+        monkeypatch.setattr(inlayer, "MAX_GRID_VOXELS", 1_000_000)
+
+    def test_rotated_rod_is_refused(self, tmp_path, small_limit):
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000)
+        path = tmp_path / "rod.stl"
+        trimesh.creation.box(extents=[120.0, 4.0, 4.0]).export(file_obj=str(path), file_type="stl")
+        rod = inlayer.prepare_figure(str(path), cfg)  # about 1e4 voxels: accepted
+        assert inlayer.dilate(rod, cfg.clearance, cfg, name="rod.stl").is_watertight
+
+        diagonal = inlayer.apply_euler_rotation(rod, 0.0, 35.264, 45.0)
+        with pytest.raises(ValueError, match="rod.stl is too large"):
+            inlayer.dilate(diagonal, cfg.clearance, cfg, name="rod.stl")
+
+    def test_padding_for_the_clearance_counts(self, prepared_cube, fast_test_config, small_limit):
+        """The dilation pads the grid by its own reach on every side."""
+        inlayer.dilate(prepared_cube, 0.5, fast_test_config)
+        with pytest.raises(ValueError, match="The figure is too large"):
+            inlayer.dilate(prepared_cube, 20.0, fast_test_config)
+
+
 class TestIsotropicClearance:
     """Slopes get the same clearance as axis-parallel faces (review B27).
 

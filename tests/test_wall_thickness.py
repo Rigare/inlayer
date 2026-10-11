@@ -93,6 +93,20 @@ class TestFindings:
         check = inlayer._wall_check(box, [cutter], box - cutter, CFG)
         assert [(v["kind"], v["figure"]) for v in check["violations"]] == [("sealed", 0)]
 
+    @pytest.mark.parametrize("short_by,passes", [(0.04, True), (0.06, False)])
+    def test_tolerance_is_five_hundredths(self, short_by, passes):
+        """WALL_TOLERANCE_MM absorbs rounding, nothing more. Every other case
+        stays at least half a millimetre away from the threshold: a check that
+        let 1.6 mm pass for 2.0 was indistinguishable to the whole suite."""
+        wall = CFG.wall_thickness - short_by
+        box = Manifold.cube((20.0, 20.0, 10.0)).translate((-10.0, -10.0, -10.0))
+        # A pocket open at the top, `wall` away from one side and from the bottom
+        cutter = Manifold.cube((10.0, 10.0, 12.0)).translate((-10.0 + wall, -5.0, -10.0 + wall))
+        check = inlayer._wall_check(box, [cutter], box - cutter, CFG)
+        assert check["min_wall_mm"] == pytest.approx(wall, abs=1e-4)
+        assert check["passes_min_wall"] is passes
+        assert {v["kind"] for v in check["violations"]} == (set() if passes else {"side", "floor"})
+
     def test_recess_breakthrough_names_its_figure(self, dilated_cube):
         """Recesses are part of their figure's cutter; the old check only
         reported a blanket "0.00 mm" and no figure."""
@@ -134,6 +148,35 @@ class TestDescribeViolation:
         i18n.set_language(lang)
         line = inlayer.describe_violation(self.FINDING, ["a.stl", "b.stl"])
         assert "b.stl" in line and "a.stl" in line and "0.80" in line and "2.00" in line
+
+    KINDS = ("side", "floor", "inner", "merged", "sealed", "no_cavity")
+
+    def test_these_are_the_kinds_the_check_emits(self):
+        """A new kind needs its `check.*` text: an unknown key comes back as
+        the key itself and both UIs would print "check.overhang"."""
+        import inspect
+        import re
+
+        emitted = set(re.findall(r'flag\("(\w+)"', inspect.getsource(inlayer._wall_check)))
+        assert emitted == set(self.KINDS)
+        assert {f"check.{kind}" for kind in emitted} <= set(i18n.TRANSLATIONS)
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_every_kind_is_a_filled_in_sentence(self, kind, lang):
+        """t() returns a template unformatted when a placeholder is missing:
+        with `{name}` renamed in `check.side` the CLI printed
+        "{figure}: side wall {measured} mm" and every test passed. Only
+        `inner` was ever rendered."""
+        i18n.set_language(lang)
+        line = inlayer.describe_violation({**self.FINDING, "kind": kind}, ["a.stl", "b.stl"])
+        assert line.startswith("b.stl: ") and "{" not in line
+        if kind in ("inner", "merged"):
+            assert "a.stl" in line
+        if kind in ("side", "floor", "inner"):
+            assert line.index("0.80") < line.index("2.00")  # measured, then target
+        if kind == "merged":
+            assert "2.00" in line
 
     def test_unknown_figure_does_not_raise(self):
         line = inlayer.describe_violation({**self.FINDING, "kind": "sealed", "figure": None}, [])

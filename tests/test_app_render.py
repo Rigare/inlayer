@@ -22,6 +22,7 @@ from streamlit.testing.v1 import AppTest
 
 import i18n
 import inlayer
+from tests.conftest import binary_stl
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -73,6 +74,70 @@ class TestUploadRobustness:
         at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("empty.stl", b"")])
         assert any("empty.stl" in w.value for w in at.warning)
         assert list(_trace_extents(at)) == ["a.stl"]
+
+    def test_file_of_nan_coordinates_is_skipped_too(self):
+        """It loaded as a mesh with faces and no vertices: the preview raised
+        an IndexError and drew no chart for any upload."""
+        nan_stl = binary_stl(np.full((12, 3, 3), np.nan))
+        at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("nan.stl", nan_stl)])
+        assert any("nan.stl" in w.value for w in at.warning)
+        assert list(_trace_extents(at)) == ["a.stl"]
+
+
+class TestFailedRun:
+    """A run that fails says which upload it failed on."""
+
+    # Previews fine, but is no solid: the pipeline refuses it
+    SHEET = binary_stl([[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]])
+
+    def test_error_names_the_upload_not_its_temp_file(self):
+        """The run reads uploads from temporary files and the message named
+        those: "/tmp/tmpk3x9.stl contains no triangles" - which of two uploads?"""
+        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10])), ("sheet.stl", self.SHEET)])
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        (message,) = [e.value for e in at.error]
+        assert "sheet.stl has no volume" in message
+        assert "tmp" not in message
+        # The message is the whole story - no stack trace below it
+        assert not at.exception
+
+    def test_a_bug_goes_to_the_server_log_not_to_the_browser(self, monkeypatch, caplog):
+        """Every failure used to end in st.exception: the full traceback with
+        absolute paths and source lines, shown to whoever was using the app."""
+        def bug(*args, **kwargs):
+            raise TypeError("detail from /srv/inlayer/app.py")
+
+        monkeypatch.setattr(inlayer, "build_inlay", bug)
+        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10]))])
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception
+        assert [e.value for e in at.error] == [i18n.TRANSLATIONS["app.error.unexpected"]["en"]]
+        assert "detail from /srv/inlayer/app.py" in caplog.text
+
+
+class TestRunWithoutUpload:
+    """Without an upload the run takes ./figure.stl, like the CLI's default."""
+
+    def test_error_when_there_is_nothing_to_process(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        at = _run("en")
+        at.button[0].click().run()
+        assert not at.exception
+        (message,) = [e.value for e in at.error]
+        assert message == i18n.t("app.error.no_input", path="figure.stl")
+        assert "result" not in at.session_state
+
+    def test_figure_stl_in_the_working_directory_is_used(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "figure.stl").write_bytes(_stl([10, 10, 10]))
+        at = _run("en")
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception and not at.error
+        assert at.session_state["result"]["file_names"] == ["figure.stl"]
+        assert (tmp_path / "figure.stl").exists()  # only temporary upload files are cleaned up
 
 
 class TestCacheIdentity:
@@ -403,6 +468,11 @@ def test_widgets_start_with_the_pipeline_defaults():
         assert _widget(at, kind, key).value == getattr(cfg, field), key
 
 
+def _badges(at: AppTest) -> list[str]:
+    """The wall-check badges on the page (HTML of the markdown elements)."""
+    return [m.value for m in at.markdown if '-badge">' in m.value]  # not the stylesheet
+
+
 class TestResult:
     @staticmethod
     def _generate(at: AppTest) -> AppTest:
@@ -410,6 +480,38 @@ class TestResult:
         at.button[0].click().run()
         assert not at.exception, [str(e.value) for e in at.exception]
         return at
+
+    def test_passing_check_shows_the_green_badge(self):
+        at = self._generate(_upload(_run("en"), [("cube.stl", _stl([10, 10, 10]))]))
+        ok = i18n.TRANSLATIONS["app.results.wall_ok"]["en"]
+        assert _badges(at) == [f'<div class="success-badge">{ok}</div>']
+        assert not at.warning
+
+    def test_failing_check_shows_the_warning_and_names_the_finding(self):
+        """The verdict of the wall check is what keeps scrap off the printer.
+        No test produced a failing one in the app: with the condition of the
+        badge turned around the whole suite stayed green."""
+        at = _upload(_run("en"), [("cube.stl", _stl([10, 10, 10]))])
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        _widget(at, "number_input", "box_width").set_value(14.0).run()  # needs about 16 mm
+        at = self._generate(at)
+        failed = i18n.TRANSLATIONS["app.results.wall_thin"]["en"]
+        assert _badges(at) == [f'<div class="warning-badge">{failed}</div>']
+        (warning,) = [w.value for w in at.warning]
+        assert "minimum wall thickness 2.0 mm" in warning
+        assert "- cube.stl: side wall" in warning and "(target 2.00 mm)" in warning
+        assert at.session_state["result"]["stats_3d"]["passes_min_wall"] is False
+
+    def test_manual_cylinder_shows_its_diameter(self):
+        at = _upload(_run("en"), [("cube.stl", _stl([10, 10, 10]))])
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        _widget(at, "number_input", "box_diameter").set_value(40.0).run()
+        _widget(at, "number_input", "box_height").set_value(14.0).run()
+        at = self._generate(at)
+        res = at.session_state["result"]
+        assert (res["actual_w"], res["actual_d"], res["actual_h"]) == (40.0, 40.0, 14.0)
+        assert any("Ø40.0×14.0 mm" in m.value for m in at.markdown)
 
     def test_switching_the_recess_selection_is_not_a_change(self):
         """Review N6/B23: only showing another figure marked the result stale."""

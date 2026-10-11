@@ -459,6 +459,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Berechnung fehlgeschlagen: {error}",
         "en": "Computation failed: {error}",
     },
+    "app.error.unexpected": {
+        "de": "Bei der Berechnung ist ein unerwarteter Fehler aufgetreten. Die Details stehen im Protokoll des Servers.",
+        "en": "Something unexpected went wrong during the computation. The details are in the server's log.",
+    },
     # --- Fortschritt & Protokoll -------------------------------------------
     "app.label.figures": {
         "de": "{n} Figuren",
@@ -803,9 +807,21 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "{name} enthält keine Dreiecke – die Datei ist leer oder keine gültige STL.",
         "en": "{name} contains no triangles – the file is empty or not a valid STL.",
     },
+    "error.out_of_memory": {
+        "de": "Der Arbeitsspeicher reicht für diese Auflösung nicht aus. Wähle einen größeren voxel_pitch.",
+        "en": "Not enough memory for this resolution. Choose a larger voxel_pitch.",
+    },
+    "error.not_solid": {
+        "de": "{name} hat kein Volumen – die Datei muss einen geschlossenen Körper beschreiben, keine flache Fläche.",
+        "en": "{name} has no volume – the file must describe a closed solid, not a flat surface.",
+    },
     "error.grid_too_large": {
         "de": "{name} ist für diese Auflösung zu groß: das Voxelgitter hätte {voxels} Voxel (Grenze {limit}). Wähle einen größeren voxel_pitch oder prüfe die Skalierung.",
         "en": "{name} is too large for this resolution: its voxel grid would have {voxels} voxels (limit {limit}). Choose a larger voxel_pitch or check the scale.",
+    },
+    "error.unnamed_figure": {
+        "de": "Die Figur",
+        "en": "The figure",
     },
     # --- CLI ----------------------------------------------------------------
     "cli.description": {
@@ -833,8 +849,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Minimum wall thickness in mm (default: {default})",
     },
     "cli.depth_fraction": {
-        "de": "Tiefe des Einlegers relativ zur Figur (0.0-1.0, Standard: {default})",
-        "en": "Insert depth relative to the figure (0.0-1.0, default: {default})",
+        "de": "Tiefe des Einlegers relativ zur Figur (größer 0 bis 1.0, Standard: {default})",
+        "en": "Insert depth relative to the figure (above 0 up to 1.0, default: {default})",
     },
     "cli.voxel_pitch": {
         "de": "Auflösung des Voxelgitters in mm (Standard: {default})",
@@ -849,8 +865,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Scale factor: 1.0=mm, 0.1=0.1mm, 25.4=inch (default: {default})",
     },
     "cli.box_shape": {
-        "de": "Form der Box: 'box' (Quader) oder 'cylinder' (Zylinder) (Standard: 'box')",
-        "en": "Box shape: 'box' (cuboid) or 'cylinder' (default: 'box')",
+        "de": "Form der Box: 'box' (Quader) oder 'cylinder' (Zylinder) (Standard: '{default}')",
+        "en": "Box shape: 'box' (cuboid) or 'cylinder' (default: '{default}')",
     },
     "cli.box_diameter": {
         "de": "Manueller Zylinder-Durchmesser in mm, nur bei --box-shape cylinder (Standard: automatisch)",
@@ -869,16 +885,16 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Manual box height (Z) in mm (default: automatic)",
     },
     "cli.offset_x": {
-        "de": "Manuelle X-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual X offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle X-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual X offset of the figure(s) in mm (default: {default})",
     },
     "cli.offset_y": {
-        "de": "Manuelle Y-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual Y offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle Y-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual Y offset of the figure(s) in mm (default: {default})",
     },
     "cli.offset_z": {
-        "de": "Manuelle Z-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual Z offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle Z-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual Z offset of the figure(s) in mm (default: {default})",
     },
     "cli.rot_x": {
         "de": "Manuelle X-Rotation der Figur(en) in Grad (Standard: 0.0)",
@@ -897,8 +913,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Gap between figures in mm (default: wall_thickness)",
     },
     "cli.layout_style": {
-        "de": "Anordnungsmethode bei mehreren Figuren: 'compact', 'horizontal', 'vertical' (Standard: 'compact')",
-        "en": "Arrangement for multiple figures: 'compact', 'horizontal', 'vertical' (default: 'compact')",
+        "de": "Anordnungsmethode bei mehreren Figuren: 'compact', 'horizontal', 'vertical' (Standard: '{default}')",
+        "en": "Arrangement for multiple figures: 'compact', 'horizontal', 'vertical' (default: '{default}')",
     },
     "cli.finger_recesses": {
         "de": "Fingermulden (Entnahmehilfe) links/rechts jeder Figur aktivieren",
@@ -909,8 +925,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Radius of the finger recesses in mm (default: {default})",
     },
     "cli.finger_recess_axis": {
-        "de": "Achse der Fingermulden: 'x' (links/rechts) oder 'y' (vorne/hinten) (Standard: 'x')",
-        "en": "Axis of the finger recesses: 'x' (left/right) or 'y' (front/back) (default: 'x')",
+        "de": "Achse der Fingermulden: 'x' (links/rechts) oder 'y' (vorne/hinten) (Standard: '{default}')",
+        "en": "Axis of the finger recesses: 'x' (left/right) or 'y' (front/back) (default: '{default}')",
     },
     "cli.finger_recess_z_offset": {
         "de": "Absenkung der Fingermulden unter die Box-Oberkante in mm (Standard: {default})",
@@ -923,6 +939,14 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "cli.error.recess_position_count": {
         "de": "--finger-recess-position erwartet 1 Wert oder einen je Eingabedatei ({given} angegeben, {n} Dateien)",
         "en": "--finger-recess-position expects 1 value or one per input file (got {given} for {n} files)",
+    },
+    "cli.error.output_not_writable": {
+        "de": "Ausgabedatei {path} kann nicht geschrieben werden: der Pfad ist ein Verzeichnis oder schreibgeschützt, oder sein Verzeichnis fehlt oder ist nicht beschreibbar.",
+        "en": "Cannot write the output file {path}: the path is a directory or write-protected, or its directory is missing or not writable.",
+    },
+    "cli.error.failed": {
+        "de": "Fehler: {error}",
+        "en": "Error: {error}",
     },
     "cli.parallel": {
         "de": "Mehrere Figuren parallel auf mehreren CPU-Kernen verarbeiten (max. {workers} Threads, erhöht den Speicherbedarf)",

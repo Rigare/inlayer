@@ -8,6 +8,7 @@ import trimesh
 
 import inlayer
 from inlayer import Config
+from tests.conftest import binary_stl
 
 
 class TestPrepareFigureErrors:
@@ -32,6 +33,39 @@ class TestPrepareFigureErrors:
         path.write_bytes(content)
         with pytest.raises(ValueError, match="broken.stl.*no triangles"):
             inlayer.prepare_figure(str(path))
+
+    @pytest.mark.parametrize("value", [np.nan, np.inf])
+    def test_file_of_non_finite_coordinates_names_the_file(self, tmp_path, value):
+        """trimesh drops every vertex of such a file and keeps its faces: the
+        emptiness check passed and the first look at the bounds raised
+        `IndexError: index 0 is out of bounds for axis 0 with size 0`."""
+        path = tmp_path / "broken.stl"
+        path.write_bytes(binary_stl(np.full((12, 3, 3), value)))
+        with pytest.raises(ValueError, match="broken.stl.*no triangles"):
+            inlayer.prepare_figure(str(path))
+
+    @pytest.mark.parametrize(
+        "triangles",
+        [[[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]],
+         np.ones((12, 3, 3)),
+         [[[k, 0, 0], [k + 1, 0, 0], [k + 2, 0, 0]] for k in range(12)]],
+        ids=["flat-square", "collapsed-to-a-point", "collinear"],
+    )
+    def test_file_without_volume_names_the_file(self, tmp_path, fast_test_config, triangles):
+        """Triangles, but nothing the repair could close into a solid: it
+        returned an empty mesh and the voxelizer failed on it with `zero-size
+        array to reduction operation minimum which has no identity`."""
+        path = tmp_path / "sheet.stl"
+        path.write_bytes(binary_stl(triangles))
+        with pytest.raises(ValueError, match="sheet.stl has no volume"):
+            inlayer.prepare_figure(str(path), fast_test_config)
+
+    def test_errors_use_the_given_name(self, tmp_path):
+        """The web app passes the upload's name; the path is a temporary file."""
+        path = tmp_path / "tmpk3x9.stl"
+        path.write_bytes(b"")
+        with pytest.raises(ValueError, match="^my figure.stl contains no triangles"):
+            inlayer.prepare_figure(str(path), name="my figure.stl")
 
     def test_oversized_grid_is_refused_up_front(self, cube_stl_path):
         """A small file scaled up must fail with a message, not exhaust memory."""
@@ -80,10 +114,11 @@ class TestPrepareFigureKeepsEveryShell:
 
 
 class TestVoxelizeSurface:
-    """_voxelize_surface replaces trimesh's subdivision voxelizer for raw input.
+    """_voxelize_surface replaces trimesh's subdivision voxelizer in every step.
 
     trimesh quarters each triangle until all edges are below pitch / 2, so a
-    long, thin triangle costs (length / pitch)² however little area it has.
+    long, thin triangle costs (length / pitch)² however little area it has -
+    and a fine mesh is still split into 16 or 64 triangles each.
     """
 
     @staticmethod
@@ -129,6 +164,33 @@ class TestVoxelizeSurface:
         tracemalloc.stop()
         assert peak < 200 * 1024**2
         assert vox.matrix.shape[2] >= 120 / 0.4
+
+    def test_batching_does_not_change_the_grid(self, monkeypatch):
+        """The samples are marked batch by batch; where a batch ends - between
+        two triangles, two rows or in the middle of a segment - must not show."""
+        mesh = trimesh.creation.icosphere(subdivisions=3, radius=10.0)
+        mesh.apply_transform(trimesh.transformations.euler_matrix(0.3, 0.5, 0.7))
+        whole = inlayer._voxelize_surface(mesh, 0.5)
+        monkeypatch.setattr(inlayer, "_SURFACE_SAMPLE_BATCH", 7)
+        in_pieces = inlayer._voxelize_surface(mesh, 0.5)
+        np.testing.assert_array_equal(whole.matrix, in_pieces.matrix)
+        np.testing.assert_array_equal(whole.transform, in_pieces.transform)
+
+    def test_memory_follows_the_grid_not_the_surface_area(self):
+        """Ten plates of 100 x 100 mm stacked within 20 mm: a grid of 1.5 MB
+        under 2000 cm² of surface. All samples at once took 590 MB - a 12 kB
+        STL far below the grid limit."""
+        import tracemalloc
+
+        plates = [trimesh.creation.box(extents=[100.0, 100.0, 0.05]) for _ in range(10)]
+        for k, plate in enumerate(plates):
+            plate.apply_translation([0.0, 0.0, 2.0 * k])
+        tracemalloc.start()
+        vox = inlayer._voxelize_surface(trimesh.util.concatenate(plates), 0.5)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert peak < 80 * 1024**2
+        assert vox.matrix.shape == (201, 201, 37)
 
     def test_low_poly_bar_no_longer_aborts(self, tmp_path):
         """A 12-triangle 250 mm bar ended in 'max_iter exceeded' (review B16)."""
@@ -237,6 +299,31 @@ class TestPrepareFigureDecimation:
         # daher pruefen wir nur, dass kein Fehler auftrat.
         assert isinstance(m, trimesh.Trimesh)
         assert m.is_watertight
+
+    def test_the_decimated_mesh_is_what_gets_voxelized(self, sphere_stl_path, monkeypatch):
+        """The face count after the voxel step says nothing about the
+        decimation: with that step removed every test passed. The spy hands
+        back a mesh of half the size, which shows in the result."""
+        calls = []
+        decimate = inlayer.decimate_mesh
+
+        def halved(mesh, face_count):
+            calls.append((len(mesh.faces), face_count))
+            small = decimate(mesh, face_count)
+            small.apply_scale(0.5)
+            return small
+
+        monkeypatch.setattr(inlayer, "decimate_mesh", halved)
+        m = inlayer.prepare_figure(sphere_stl_path, Config(voxel_pitch=1.0, decimate_faces=50))
+        assert calls == [(320, 50)]
+        assert np.all(m.extents < 8.0)  # the 10 mm sphere, halved, plus voxel inflation
+
+    def test_below_the_target_nothing_is_decimated(self, sphere_stl_path, monkeypatch):
+        def never(mesh, face_count):
+            raise AssertionError("320 faces are below the target of 1000")
+
+        monkeypatch.setattr(inlayer, "decimate_mesh", never)
+        inlayer.prepare_figure(sphere_stl_path, Config(voxel_pitch=1.0, decimate_faces=1000))
 
 
 class TestPrepareFigureRepairSkip:

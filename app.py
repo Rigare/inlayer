@@ -15,6 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import io
+import logging
 import os
 import time
 import tempfile
@@ -94,18 +95,23 @@ st.markdown(
 # --- Caching ----------------------------------------------------------------
 @st.cache_resource(show_spinner=False, max_entries=32)
 def _cached_prepare(
-    _path: str, file_hash: str, scale: float, pitch: float, decimate_faces: int
+    _path: str, _name: str, file_hash: str, scale: float, pitch: float, decimate_faces: int
 ) -> trimesh.Trimesh:
-    """Step 1, cached as long as file content and parameters stay the same."""
+    """Step 1, cached as long as file content and parameters stay the same.
+
+    `_path` is the upload's temporary file, `_name` what the user called it:
+    errors name the latter. Neither is part of the cache key.
+    """
     config = inlayer.Config(
         stl_unit_to_mm=scale, voxel_pitch=pitch, decimate_faces=decimate_faces
     )
-    return inlayer.prepare_figure(_path, config)
+    return inlayer.prepare_figure(_path, config, name=_name)
 
 
 @st.cache_resource(show_spinner=False, max_entries=32)
 def _cached_dilate(
     _mesh: trimesh.Trimesh,
+    _name: str,
     file_hash: str,
     scale: float,
     pitch: float,
@@ -115,9 +121,12 @@ def _cached_dilate(
     rot_y: float,
     rot_z: float,
 ) -> trimesh.Trimesh:
-    """Step 2, cached as long as figure, clearance, pitch and rotation stay the same."""
+    """Step 2, cached as long as figure, clearance, pitch and rotation stay the same.
+
+    `_name` only labels an error message and is not part of the cache key.
+    """
     config = inlayer.Config(voxel_pitch=pitch)
-    return inlayer.dilate(_mesh, clearance, config)
+    return inlayer.dilate(_mesh, clearance, config, name=_name)
 
 
 # Face budget of the inlay in the result view
@@ -755,7 +764,7 @@ if run_btn:
             if is_multi and not enable_parallel:
                 logger.log(t("app.log.figure_n", i=i + 1, n=n_files, name=file_names[i]))
             mesh = _cached_prepare(
-                input_paths[i], file_hashes[i], scale, voxel_pitch, decimate_faces
+                input_paths[i], file_names[i], file_hashes[i], scale, voxel_pitch, decimate_faces
             )
             rotated = inlayer.apply_euler_rotation(mesh, *rotations[i]) if any(rotations[i]) else mesh
             return mesh, rotated
@@ -771,8 +780,8 @@ if run_btn:
         t_step = logger.log(t("app.log.dilate"), t_step)
         dilated = inlayer._parallel_map(
             lambda i: _cached_dilate(
-                fig_meshes[i], file_hashes[i], scale, voxel_pitch, decimate_faces,
-                clearance, *rotations[i],
+                fig_meshes[i], file_names[i], file_hashes[i], scale, voxel_pitch,
+                decimate_faces, clearance, *rotations[i],
             ),
             range(n_files), config, what=t("pipeline.what.dilate"), worker_init=_attach_ctx,
         )
@@ -834,9 +843,17 @@ if run_btn:
             "is_multi": is_multi,
         }
 
-    except Exception as e:
-        status_box.error(t("app.error.failed", error=e))
-        st.exception(e)
+    except (ValueError, RuntimeError, MemoryError) as e:
+        # Raised on purpose, with a message written for the user: an unusable
+        # upload, a grid beyond the limit, a box that leaves no material.
+        reason = t("error.out_of_memory") if isinstance(e, MemoryError) else e
+        status_box.error(t("app.error.failed", error=reason))
+    except Exception:
+        # Anything else is a bug. Its traceback - absolute paths, source lines -
+        # belongs in the server log, not in the browser of whoever uses the app
+        # (st.exception shows it whatever client.showErrorDetails says).
+        logging.getLogger("inlayer.app").exception("Inlay run failed")
+        status_box.error(t("app.error.unexpected"))
 
     finally:
         for tp in tmp_paths:

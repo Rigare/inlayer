@@ -136,12 +136,23 @@ docker compose up --build
 
 Files enter the web app through the **upload dialog** in the sidebar, and the
 finished inlay leaves through the **download button** — no volume required.
+The bundled `compose.yaml` starts the container in German (`INLAYER_LANG=de`);
+remove that line for English.
 
 The container inherits the same 250 MB upload limit; override it from the host
 without editing `compose.yaml`:
 
 ```bash
 STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500 docker compose up --build
+```
+
+`compose.yaml` also caps what the container may take from the host: 4 GB of
+memory and 4 CPUs. A run that needs more is stopped by the kernel and the
+container restarts, instead of the whole machine running out of memory. Set the
+limits to fit your host the same way:
+
+```bash
+INLAYER_MEM_LIMIT=8g INLAYER_CPUS=8 docker compose up --build
 ```
 
 The `./data` volume in `compose.yaml` exists purely for **CLI use inside the
@@ -178,12 +189,12 @@ The web app is a full GUI with live preview:
 | Feature | Description |
 |---|---|
 | 🌍 **English / German** | Switch the interface language in the sidebar at any time |
-| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar |
-| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline |
+| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI |
+| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. After a run the viewer shows that result until you generate again; if settings or uploads have changed since, a warning says it is out of date |
 | 🧩 **Auto arrangement** | Multiple figures are placed without collisions (`compact` / `horizontal` / `vertical`) with an adjustable gap — it follows the wall thickness until you set it yourself |
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
-| 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box |
-| 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z |
+| 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box, in steps of 1, 5 or 10 mm |
+| 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z, in steps of 1, 5, 10 or 45° |
 | 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis and depth; the position along the figure is set **per figure**) |
 | ⚡ **Multi-threading** | Optionally process several figures in parallel across CPU cores (checkbox in the sidebar) |
 | 📐 **Box overrides** | Optionally force fixed box dimensions |
@@ -194,8 +205,11 @@ The web app is a full GUI with live preview:
 
 ### Command line (CLI)
 
-```powershell
-# Minimal invocation (reads figure.stl, writes inlay.stl)
+The multi-line examples use bash line continuations; in PowerShell end a
+continued line with a backtick (`` ` ``) instead of a backslash.
+
+```bash
+# Minimal invocation (reads figure.stl from the current directory, writes inlay.stl)
 python inlayer.py
 
 # Adjust every parameter
@@ -245,7 +259,8 @@ you can inspect it.
 | Exit code | Meaning |
 |---|---|
 | `0` | Inlay written, wall check passed |
-| `2` | Invalid arguments (argparse usage error) — nothing was computed |
+| `1` | The run failed — an unreadable STL, a voxel grid too large for the resolution, a box too small to leave any material, not enough memory. One line on stderr says which; no inlay is written |
+| `2` | Invalid arguments (argparse usage error), an input file that does not exist or an output path that cannot be written — nothing was computed |
 | `3` | Inlay written, but the wall check found problems |
 
 All `--finger-recess-position` values are validated while parsing. Their count
@@ -275,7 +290,8 @@ pip install -r requirements-dev.txt
 # Full suite (~70 s)
 pytest
 
-# Faster: skips end-to-end / CLI runs and the finest-pitch geometry checks
+# Faster: skips the tests that start the CLI as a subprocess and the
+# finest-pitch geometry checks (the CLI's flags are still tested, in-process)
 pytest -m "not slow"
 
 # A single file or test
@@ -363,19 +379,28 @@ value as a usage error before any work starts.
 
 ### Print settings
 
-| Parameter | Default | Description |
+| Parameter / CLI flag | Default | Description |
 |---|---|---|
-| `clearance` | 0.4 mm | Clearance between figure and cavity |
-| `wall_thickness` | 2.0 mm | Minimum side and floor wall thickness |
-| `depth_fraction` | 0.7 | Fraction of **each** figure's own height inside its cavity (30 % stands proud) |
+| `clearance` / `-c`, `--clearance` | 0.4 mm | Clearance between figure and cavity |
+| `wall_thickness` / `-w`, `--wall-thickness` | 2.0 mm | Minimum side and floor wall thickness |
+| `depth_fraction` / `-df`, `--depth-fraction` | 0.7 | Fraction of **each** figure's own height inside its cavity (30 % stands proud) |
+
+> The clearance is cut in voxels, so it is approximate. It takes effect in
+> steps of half a `voxel_pitch` — at the default pitch 0.1, 0.2 and 0.3 mm give
+> the same inlay, as do 0.4 and 0.5 — and the cavity never comes out tighter
+> than about one to two `voxel_pitch` around the figure's walls, whatever
+> smaller value is set: a configured 0.4 mm becomes 0.4 to 0.8 mm at the
+> defaults (0.6 on average) and about 1.5 mm at `voxel_pitch` 1.0. Sharp edges
+> at the bottom of a figure can sit closer. For a snug fit choose a finer
+> `voxel_pitch`.
 
 ### Mesh processing
 
-| Parameter | Default | Description |
+| Parameter / CLI flag | Default | Description |
 |---|---|---|
-| `voxel_pitch` | 0.4 mm | Resolution of the voxel operations |
-| `decimate_faces` | 20,000 | Target triangle count after decimation |
-| `stl_unit_to_mm` | 1.0 | Unit scaling (1.0 = mm, 25.4 = inch) |
+| `voxel_pitch` / `-vp`, `--voxel-pitch` | 0.4 mm | Resolution of the voxel operations |
+| `decimate_faces` / `--decimate-faces` | 20,000 | Target triangle count after decimation |
+| `stl_unit_to_mm` / `--scale` | 1.0 | Unit scaling (1.0 = mm, 25.4 = inch) |
 
 ### Box shape & dimensions (optional)
 
@@ -448,11 +473,11 @@ value as a usage error before any work starts.
 >   a single one) above the position slider. Each figure keeps its own value;
 >   the other recess settings apply to all of them.
 > - **CLI:** `--finger-recess-position` takes either one value for every figure
->   or one value per `-i` file, in that order. Any other count is an error rather
->   than a guess.
+>   or one value per `-i` file, in that order. With `--finger-recesses` any other
+>   count is an error rather than a guess.
 > - **API:** `build_inlay(..., individual_recess_positions=[...])` — figures
->   without an entry fall back to `Config.finger_recess_position`. App and CLI
->   always pass the per-figure list.
+>   without an entry fall back to `Config.finger_recess_position`. The app
+>   always passes the per-figure list, the CLI whenever recesses are on.
 
 ### Language (optional)
 
@@ -477,16 +502,18 @@ value as a usage error before any work starts.
 > `min(figures, cores, 4)`×). The worker count is capped at 4 because parallel
 > voxel grids multiply memory use.
 
-> If a box dimension is smaller than the computed minimum, a warning is issued —
-> the computation does not abort.
+> If a box dimension is smaller than the computed minimum, a warning is issued
+> and the wall check lists the walls that came out too thin — the computation
+> does not abort. The one exception is a box that lies entirely inside a
+> cavity: nothing of it is left, and the run ends with an error saying so.
 
 ---
 
 ## ⚠️ Technical notes
 
 - **Even clearance on slopes:** the tolerance offset grows the figure by the same amount in every direction (within about 5 %). The plain voxel dilation used before grew an octahedron — with 2 mm of clearance a figure got only about 1.5 mm on 45° slopes and could jam there.
-- **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `VOXEL_PITCH` raises memory use by roughly 8×.
-- **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore calls `apply_transform(vox.transform)` manually after every `marching_cubes` call.
+- **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `voxel_pitch` raises memory use by roughly 8×.
+- **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore applies it itself, in `_grid_to_mesh` — the one place that calls `marching_cubes`.
 - **CSG engine:** boolean operations run in `manifold3d` (directly, never trimesh's default engine). manifold3d already parallelises internally across cores.
 - **Multi-threading:** the optional parallelisation (`--parallel` / web-app checkbox) uses a `ThreadPoolExecutor` — numpy/scipy/trimesh release the GIL during their C calls, so threads give real multi-core speedup without process overhead. With parallelisation enabled, log lines from individual figures can interleave.
 - **Decimation is serialised:** `fast_simplification` (also behind `trimesh.simplify_quadric_decimation`) loads the mesh into process-global state. Concurrent calls from several threads therefore hand *every* caller the same mesh — with `--parallel` this produced an inlay whose cavities all showed the same figure. All decimation now goes through `inlayer.decimate_mesh` behind a lock; only the remaining steps (voxelisation, dilation, solidification) still run in parallel.
@@ -497,8 +524,8 @@ value as a usage error before any work starts.
 - **Manual offsets** move a figure inside a box that stays put; walls made too thin that way are reported by the check.
 - **Cavities stay open:** each cavity is extruded up through the top face. With `depth_fraction = 1.0` and a negative Z offset the pocket used to close at the top — a sealed void in the print.
 - **Repair only when needed:** `prepare_figure` skips `pymeshfix` when the loaded mesh is already watertight **and** consistently wound — the normal case for cleanly exported STLs. That halves the step's runtime (measured 1.99 s → 1.08 s at 82k triangles) and does not change the geometry. Watertightness alone is not a sufficient criterion: a mesh with inverted faces is watertight but would corrupt the subsequent voxel fill. When the repair does run, it keeps **every** shell of the file: pymeshfix's default drops all but the shell with the most triangles, so a miniature with a separate base used to lose the base as soon as the file had a single hole anywhere.
-- **Low-poly meshes:** input meshes are voxelised by sampling each triangle in rows along its longest edge, so the cost follows the surface area. trimesh's own voxeliser subdivides until *every* edge is below `voxel_pitch / 2`, which costs (edge length / pitch)² per triangle — the long, thin triangles of CAD exports (rods, pins, profiles) took gigabytes or aborted with "max_iter exceeded". A figure whose voxel grid would exceed `MAX_GRID_VOXELS` (10⁹ voxels at `voxel_pitch / 2`, the finest grid in the pipeline) is refused with a message suggesting a larger pitch, instead of exhausting the machine's memory.
-- **Broken files:** an empty or unreadable STL is rejected with a message naming the file. In the web app the instant preview skips such a file with a warning and still shows the others.
+- **Low-poly meshes:** input meshes are voxelised by sampling each triangle in rows along its longest edge, so the cost follows the surface area. trimesh's own voxeliser subdivides until *every* edge is below `voxel_pitch / 2`, which costs (edge length / pitch)² per triangle — the long, thin triangles of CAD exports (rods, pins, profiles) took gigabytes or aborted with "max_iter exceeded". The same sampler now voxelizes the later steps too and works in batches: the tolerance offset used to be the memory peak of a run (3.8 GB for a 60 mm cube at the default settings, more than 10 GB for 100 mm) and now needs roughly an eighth of that (0.5 GB and 1.3 GB), the step itself a third of the time. Cavities can differ from earlier versions by a few hundredths of a millimetre. A figure whose voxel grid would exceed `MAX_GRID_VOXELS` (10⁹ voxels at `voxel_pitch / 2`, the finest grid in the pipeline) is refused with a message suggesting a larger pitch, instead of exhausting the machine's memory. The bound is checked wherever a grid is built — on the upload, on the rotated figure plus its clearance padding, and on every cutter — so neither a rotation nor a large Z offset slips past it.
+- **Broken files:** an empty or unreadable STL is rejected with a message naming the file (in the web app: the upload, not the temporary file it is read from). So is a file whose coordinates are all NaN or infinite, and one without volume — a flat surface or triangles collapsed to a line cannot be closed into a solid. In the web app the instant preview skips such a file with a warning and still shows the others.
 - **Wall check:** measured exactly on the meshes (manifold3d) while `build_inlay` still has every figure's cutter: side and floor walls per figure, the wall between each pair of cavities, sealed voids and figures without a cavity. Each finding names its figure; `passes_min_wall` is true only without any finding. The tolerance is 0.05 mm (float rounding, the cylinder's chord error). The earlier voxel-based check overestimated walls by up to one pitch, ignored the walls between cavities and passed an inlay without any cavity.
 
 ---

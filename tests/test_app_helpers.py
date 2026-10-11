@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 from typing import cast
 
+import numpy as np
 import pytest
 import trimesh
 
 import app_helpers
+from tests.conftest import binary_stl
 
 
 class TestResolveSelection:
@@ -159,7 +161,8 @@ class TestDecimateMesh:
         sphere = trimesh.creation.icosphere(subdivisions=4)  # 5120 Faces
         target = 500
         out = app_helpers.decimate_mesh(sphere, target)
-        assert len(out.faces) < len(sphere.faces)
+        # The requested count, not just "fewer": removing 1 % passed this test
+        assert 0.9 * target <= len(out.faces) <= 1.1 * target
 
     def test_small_mesh_returned_unchanged(self):
         box = trimesh.creation.box(extents=[1, 1, 1])  # 12 Faces
@@ -211,8 +214,9 @@ class TestLoadPreviewMesh:
 
     @pytest.mark.parametrize(
         "data",
-        [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2],
-        ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage"],
+        [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2,
+         binary_stl(np.full((12, 3, 3), np.nan))],
+        ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage", "all-nan"],
     )
     def test_empty_or_garbled_upload_names_the_file(self, data):
         """An empty mesh used to crash the preview on `mesh.bounds[0][0]`."""
