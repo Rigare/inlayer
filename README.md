@@ -136,6 +136,8 @@ docker compose up --build
 
 Files enter the web app through the **upload dialog** in the sidebar, and the
 finished inlay leaves through the **download button** — no volume required.
+The bundled `compose.yaml` starts the container in German (`INLAYER_LANG=de`);
+remove that line for English.
 
 The container inherits the same 250 MB upload limit; override it from the host
 without editing `compose.yaml`:
@@ -178,12 +180,12 @@ The web app is a full GUI with live preview:
 | Feature | Description |
 |---|---|
 | 🌍 **English / German** | Switch the interface language in the sidebar at any time |
-| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar |
-| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline |
+| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI |
+| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. After a run the viewer shows that result until you generate again; if settings or uploads have changed since, a warning says it is out of date |
 | 🧩 **Auto arrangement** | Multiple figures are placed without collisions (`compact` / `horizontal` / `vertical`) with an adjustable gap — it follows the wall thickness until you set it yourself |
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
-| 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box |
-| 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z |
+| 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box, in steps of 1, 5 or 10 mm |
+| 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z, in steps of 1, 5, 10 or 45° |
 | 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis and depth; the position along the figure is set **per figure**) |
 | ⚡ **Multi-threading** | Optionally process several figures in parallel across CPU cores (checkbox in the sidebar) |
 | 📐 **Box overrides** | Optionally force fixed box dimensions |
@@ -194,8 +196,11 @@ The web app is a full GUI with live preview:
 
 ### Command line (CLI)
 
-```powershell
-# Minimal invocation (reads figure.stl, writes inlay.stl)
+The multi-line examples use bash line continuations; in PowerShell end a
+continued line with a backtick (`` ` ``) instead of a backslash.
+
+```bash
+# Minimal invocation (reads figure.stl from the current directory, writes inlay.stl)
 python inlayer.py
 
 # Adjust every parameter
@@ -365,19 +370,28 @@ value as a usage error before any work starts.
 
 ### Print settings
 
-| Parameter | Default | Description |
+| Parameter / CLI flag | Default | Description |
 |---|---|---|
-| `clearance` | 0.4 mm | Clearance between figure and cavity |
-| `wall_thickness` | 2.0 mm | Minimum side and floor wall thickness |
-| `depth_fraction` | 0.7 | Fraction of **each** figure's own height inside its cavity (30 % stands proud) |
+| `clearance` / `-c`, `--clearance` | 0.4 mm | Clearance between figure and cavity |
+| `wall_thickness` / `-w`, `--wall-thickness` | 2.0 mm | Minimum side and floor wall thickness |
+| `depth_fraction` / `-df`, `--depth-fraction` | 0.7 | Fraction of **each** figure's own height inside its cavity (30 % stands proud) |
+
+> The clearance is cut in voxels, so it is approximate. It takes effect in
+> steps of half a `voxel_pitch` — at the default pitch 0.1, 0.2 and 0.3 mm give
+> the same inlay, as do 0.4 and 0.5 — and the cavity never comes out tighter
+> than about one to two `voxel_pitch` around the figure's walls, whatever
+> smaller value is set: a configured 0.4 mm becomes 0.4 to 0.8 mm at the
+> defaults (0.6 on average) and about 1.5 mm at `voxel_pitch` 1.0. Sharp edges
+> at the bottom of a figure can sit closer. For a snug fit choose a finer
+> `voxel_pitch`.
 
 ### Mesh processing
 
-| Parameter | Default | Description |
+| Parameter / CLI flag | Default | Description |
 |---|---|---|
-| `voxel_pitch` | 0.4 mm | Resolution of the voxel operations |
-| `decimate_faces` | 20,000 | Target triangle count after decimation |
-| `stl_unit_to_mm` | 1.0 | Unit scaling (1.0 = mm, 25.4 = inch) |
+| `voxel_pitch` / `-vp`, `--voxel-pitch` | 0.4 mm | Resolution of the voxel operations |
+| `decimate_faces` / `--decimate-faces` | 20,000 | Target triangle count after decimation |
+| `stl_unit_to_mm` / `--scale` | 1.0 | Unit scaling (1.0 = mm, 25.4 = inch) |
 
 ### Box shape & dimensions (optional)
 
@@ -450,11 +464,11 @@ value as a usage error before any work starts.
 >   a single one) above the position slider. Each figure keeps its own value;
 >   the other recess settings apply to all of them.
 > - **CLI:** `--finger-recess-position` takes either one value for every figure
->   or one value per `-i` file, in that order. Any other count is an error rather
->   than a guess.
+>   or one value per `-i` file, in that order. With `--finger-recesses` any other
+>   count is an error rather than a guess.
 > - **API:** `build_inlay(..., individual_recess_positions=[...])` — figures
->   without an entry fall back to `Config.finger_recess_position`. App and CLI
->   always pass the per-figure list.
+>   without an entry fall back to `Config.finger_recess_position`. The app
+>   always passes the per-figure list, the CLI whenever recesses are on.
 
 ### Language (optional)
 
@@ -479,16 +493,18 @@ value as a usage error before any work starts.
 > `min(figures, cores, 4)`×). The worker count is capped at 4 because parallel
 > voxel grids multiply memory use.
 
-> If a box dimension is smaller than the computed minimum, a warning is issued —
-> the computation does not abort.
+> If a box dimension is smaller than the computed minimum, a warning is issued
+> and the wall check lists the walls that came out too thin — the computation
+> does not abort. The one exception is a box that lies entirely inside a
+> cavity: nothing of it is left, and the run ends with an error saying so.
 
 ---
 
 ## ⚠️ Technical notes
 
 - **Even clearance on slopes:** the tolerance offset grows the figure by the same amount in every direction (within about 5 %). The plain voxel dilation used before grew an octahedron — with 2 mm of clearance a figure got only about 1.5 mm on 45° slopes and could jam there.
-- **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `VOXEL_PITCH` raises memory use by roughly 8×.
-- **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore calls `apply_transform(vox.transform)` manually after every `marching_cubes` call.
+- **Voxel scaling:** voxel-based steps scale O(n³) with resolution. Halving `voxel_pitch` raises memory use by roughly 8×.
+- **trimesh 4.x quirk:** `VoxelGrid.marching_cubes` does not apply the grid transform to the vertices. The code therefore applies it itself, in `_grid_to_mesh` — the one place that calls `marching_cubes`.
 - **CSG engine:** boolean operations run in `manifold3d` (directly, never trimesh's default engine). manifold3d already parallelises internally across cores.
 - **Multi-threading:** the optional parallelisation (`--parallel` / web-app checkbox) uses a `ThreadPoolExecutor` — numpy/scipy/trimesh release the GIL during their C calls, so threads give real multi-core speedup without process overhead. With parallelisation enabled, log lines from individual figures can interleave.
 - **Decimation is serialised:** `fast_simplification` (also behind `trimesh.simplify_quadric_decimation`) loads the mesh into process-global state. Concurrent calls from several threads therefore hand *every* caller the same mesh — with `--parallel` this produced an inlay whose cavities all showed the same figure. All decimation now goes through `inlayer.decimate_mesh` behind a lock; only the remaining steps (voxelisation, dilation, solidification) still run in parallel.
