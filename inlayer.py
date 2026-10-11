@@ -338,6 +338,12 @@ def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.T
 # scipy's morphology holds several copies of it. Without the bound a small
 # upload scaled up (or a tiny STL with a huge bounding box) takes down a shared
 # web-app container instead of failing with a message.
+#
+# Checked wherever a grid is built, on the mesh that is voxelized there:
+# prepare_figure (early, before the repair), dilate (the rotated figure plus
+# its padding) and _solidify_figure (the cutter up to the box's top face).
+# Checking the upload alone let a rotation through: a 1 m rod of 16 mm passes
+# with 3e7 voxels and needs 2.6e10 once it is turned onto the space diagonal.
 MAX_GRID_VOXELS: Final[int] = 1_000_000_000
 
 # Sample spacing of `_voxelize_surface`, as a fraction of the pitch. Samples
@@ -349,12 +355,12 @@ MAX_GRID_VOXELS: Final[int] = 1_000_000_000
 _SURFACE_SAMPLE_SPACING: Final[float] = 0.4
 
 
-def _check_grid_size(extents: np.ndarray, pitch: float, name: str) -> None:
+def _check_grid_size(extents: Any, pitch: float, name: str | None) -> None:
     """Refuses a figure whose voxel grid at `pitch` would exceed MAX_GRID_VOXELS."""
-    voxels = float(np.prod(np.ceil(np.asarray(extents) / pitch) + 1))
+    voxels = float(np.prod(np.ceil(np.asarray(extents, dtype=float) / pitch) + 1))
     if voxels > MAX_GRID_VOXELS:
-        raise ValueError(t_("error.grid_too_large", name=name, voxels=f"{voxels:.1e}",
-                            limit=f"{MAX_GRID_VOXELS:.1e}"))
+        raise ValueError(t_("error.grid_too_large", name=name or t_("error.unnamed_figure"),
+                            voxels=f"{voxels:.1e}", limit=f"{MAX_GRID_VOXELS:.1e}"))
 
 
 def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -510,7 +516,8 @@ _CUBE: Final = np.ones((3, 3, 3), dtype=bool)
 
 
 def dilate(
-    mesh: trimesh.Trimesh, distance: float, config: Config = _DEFAULT_CFG
+    mesh: trimesh.Trimesh, distance: float, config: Config = _DEFAULT_CFG,
+    name: str | None = None,
 ) -> trimesh.Trimesh:
     """Tolerance offset via voxel dilation (more robust than a normal shift).
 
@@ -521,14 +528,19 @@ def dilate(
     configured one. Flip side: it cannot drop below ~0.75 * voxel_pitch
     (iters >= 0). The dilation is close to isotropic, so slopes and curves get
     the same clearance as axis-parallel faces (see _CUBE_STEP_SHARE).
+
+    `name` is what an error calls the figure (its file name).
     """
     pitch = config.voxel_pitch / 2
+    iters = _dilation_iterations(distance, config)
+    # The mesh arrives rotated, so its grid can be far larger than the one
+    # prepare_figure checked - plus the padding for the dilation itself.
+    _check_grid_size(mesh.extents + 2 * iters * pitch, pitch, name)
+
     t = _log(t_("pipeline.voxelize_dilation", pitch=pitch))
     vox = cast(Any, mesh.voxelized(pitch=pitch))
     vox.fill()
     _log(t_("pipeline.grid_ready"), t)
-
-    iters = _dilation_iterations(distance, config)
 
     if iters > 0:
         # Pad by 'iters' on every side: both structuring elements grow at most
@@ -646,7 +658,7 @@ def _to_trimesh(manifold: Manifold) -> trimesh.Trimesh:
 
 
 def _solidify_figure(
-    fig: trimesh.Trimesh, config: Config, top_z: float,
+    fig: trimesh.Trimesh, config: Config, top_z: float, name: str | None = None,
 ) -> trimesh.Trimesh:
     """Solidifies a figure from its underside up to `top_z` (no undercuts).
 
@@ -657,6 +669,10 @@ def _solidify_figure(
     Z offset, a short figure lowered by hand): the print had a closed void.
     """
     pitch = config.voxel_pitch
+    lo, hi = fig.bounds
+    # The grid reaches from the figure's underside up to top_z, however far a
+    # manual Z offset has pushed that.
+    _check_grid_size([hi[0] - lo[0], hi[1] - lo[1], max(hi[2], top_z) - lo[2]], pitch, name)
     sol_vox = cast(Any, fig.voxelized(pitch=pitch))
     matrix = sol_vox.matrix
     # Extend the grid upwards only - the origin sits at the bottom, so the
@@ -872,9 +888,9 @@ def build_inlay(
                    dtype=float)
         for i in range(n)
     ]
+    names = [entry(file_names, i, None) for i in range(n)]
     labels = [
-        f" '{file_names[i]}'" if file_names is not None and i < len(file_names)
-        else (f" ({i + 1}/{n})" if multi else "")
+        f" '{names[i]}'" if names[i] is not None else (f" ({i + 1}/{n})" if multi else "")
         for i in range(n)
     ]
 
@@ -893,7 +909,9 @@ def build_inlay(
         t = _log(t_("pipeline.solidify", label=labels[i]))
         # The Z offset is applied afterwards; fill far enough that the cavity
         # still reaches past the top face once it has moved.
-        solid = _solidify_figure(local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2])
+        solid = _solidify_figure(
+            local[i], config, top_z=CUT_OVERSHOOT_MM - offsets[i][2], name=names[i]
+        )
         _log(t_("pipeline.solidified", faces=i18n.format_int(len(solid.faces))), t)
         return solid
 
@@ -1246,8 +1264,8 @@ if __name__ == "__main__":
     # Step 2: tolerance offset per figure (optionally in parallel)
     print(t_("cli.step2"))
     dilated_meshes = _parallel_map(
-        lambda fig: dilate(fig, config.clearance, config),
-        rotated, config, what=t_("pipeline.what.dilate"),
+        lambda item: dilate(item[0], config.clearance, config, name=item[1]),
+        zip(rotated, input_paths), config, what=t_("pipeline.what.dilate"),
     )
 
     # Step 3: arrange, cut and check (build_inlay does all three)

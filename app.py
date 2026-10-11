@@ -106,6 +106,7 @@ def _cached_prepare(
 @st.cache_resource(show_spinner=False, max_entries=32)
 def _cached_dilate(
     _mesh: trimesh.Trimesh,
+    _name: str,
     file_hash: str,
     scale: float,
     pitch: float,
@@ -115,9 +116,12 @@ def _cached_dilate(
     rot_y: float,
     rot_z: float,
 ) -> trimesh.Trimesh:
-    """Step 2, cached as long as figure, clearance, pitch and rotation stay the same."""
+    """Step 2, cached as long as figure, clearance, pitch and rotation stay the same.
+
+    `_name` only labels an error message and is not part of the cache key.
+    """
     config = inlayer.Config(voxel_pitch=pitch)
-    return inlayer.dilate(_mesh, clearance, config)
+    return inlayer.dilate(_mesh, clearance, config, name=_name)
 
 
 # Face budget of the inlay in the result view
@@ -771,8 +775,8 @@ if run_btn:
         t_step = logger.log(t("app.log.dilate"), t_step)
         dilated = inlayer._parallel_map(
             lambda i: _cached_dilate(
-                fig_meshes[i], file_hashes[i], scale, voxel_pitch, decimate_faces,
-                clearance, *rotations[i],
+                fig_meshes[i], file_names[i], file_hashes[i], scale, voxel_pitch,
+                decimate_faces, clearance, *rotations[i],
             ),
             range(n_files), config, what=t("pipeline.what.dilate"), worker_init=_attach_ctx,
         )

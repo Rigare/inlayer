@@ -807,6 +807,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "{name} ist für diese Auflösung zu groß: das Voxelgitter hätte {voxels} Voxel (Grenze {limit}). Wähle einen größeren voxel_pitch oder prüfe die Skalierung.",
         "en": "{name} is too large for this resolution: its voxel grid would have {voxels} voxels (limit {limit}). Choose a larger voxel_pitch or check the scale.",
     },
+    "error.unnamed_figure": {
+        "de": "Die Figur",
+        "en": "The figure",
+    },
     # --- CLI ----------------------------------------------------------------
     "cli.description": {
         "de": "Inlayer: Erstellt 3D-druckbare Verpackungseinleger für Figuren.",

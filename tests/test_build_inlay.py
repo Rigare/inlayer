@@ -134,6 +134,15 @@ class TestBuildInlayOffsets:
         np.testing.assert_allclose(shift[[0, 3]], 1.0, atol=1e-3)
         assert shift[2] == pytest.approx(-1.0, abs=1e-3)
 
+    def test_cutter_grid_is_bounded_too(self, dilated_cube, fast_test_config, monkeypatch):
+        """A Z offset stretches the cutter's grid up to the top face. Far enough
+        down, that grid was allocated without the check every other one gets."""
+        monkeypatch.setattr(inlayer, "MAX_GRID_VOXELS", 100_000)
+        inlayer.build_inlay(dilated_cube, fast_test_config)
+        sunk = dataclasses.replace(fast_test_config, offset_z=-1000.0)
+        with pytest.raises(ValueError, match="cube.stl is too large"):
+            inlayer.build_inlay(dilated_cube, sunk, file_names=["cube.stl"])
+
 
 class TestBuildInlaySignature:
     """Guards against dead parameters coming back.
