@@ -323,13 +323,15 @@ def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.T
     trimesh does not raise on an empty or garbled STL - it returns a mesh
     without triangles, and the pipeline then fails far away with a cryptic
     'NoneType' error. Uploads are untrusted input, so any file that yields no
-    triangles is rejected here with a message that names it.
+    triangles is rejected here with a message that names it. So is a file
+    whose coordinates are all NaN or infinite: trimesh drops every vertex and
+    keeps the faces, and the first look at the bounds raised an IndexError.
     """
     try:
         mesh = trimesh.load(source, file_type=file_type, force="mesh")
     except Exception as exc:
         raise ValueError(t_("error.empty_input", name=name)) from exc
-    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0 or len(mesh.vertices) == 0:
         raise ValueError(t_("error.empty_input", name=name))
     return mesh
 
@@ -498,6 +500,10 @@ def prepare_figure(path: str, config: Config = _DEFAULT_CFG) -> trimesh.Trimesh:
         # part survived depended on an unrelated hole anywhere in the file.
         mf.repair(remove_smallest_components=False)
         m = trimesh.Trimesh(vertices=mf.points, faces=mf.faces)
+        if len(m.faces) == 0:
+            # Nothing that could be closed into a solid: a flat surface, or
+            # triangles collapsed to a line or a point
+            raise ValueError(t_("error.not_solid", name=path))
         _log(t_("pipeline.repaired", faces=i18n.format_int(len(m.faces))), t)
 
     t = _log(t_("pipeline.decimate", target=i18n.format_int(config.decimate_faces)))

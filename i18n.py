@@ -803,6 +803,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "{name} enthält keine Dreiecke – die Datei ist leer oder keine gültige STL.",
         "en": "{name} contains no triangles – the file is empty or not a valid STL.",
     },
+    "error.not_solid": {
+        "de": "{name} hat kein Volumen – die Datei muss einen geschlossenen Körper beschreiben, keine flache Fläche.",
+        "en": "{name} has no volume – the file must describe a closed solid, not a flat surface.",
+    },
     "error.grid_too_large": {
         "de": "{name} ist für diese Auflösung zu groß: das Voxelgitter hätte {voxels} Voxel (Grenze {limit}). Wähle einen größeren voxel_pitch oder prüfe die Skalierung.",
         "en": "{name} is too large for this resolution: its voxel grid would have {voxels} voxels (limit {limit}). Choose a larger voxel_pitch or check the scale.",

@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 from typing import cast
 
+import numpy as np
 import pytest
 import trimesh
 
 import app_helpers
+from tests.conftest import binary_stl
 
 
 class TestResolveSelection:
@@ -211,8 +213,9 @@ class TestLoadPreviewMesh:
 
     @pytest.mark.parametrize(
         "data",
-        [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2],
-        ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage"],
+        [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2,
+         binary_stl(np.full((12, 3, 3), np.nan))],
+        ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage", "all-nan"],
     )
     def test_empty_or_garbled_upload_names_the_file(self, data):
         """An empty mesh used to crash the preview on `mesh.bounds[0][0]`."""

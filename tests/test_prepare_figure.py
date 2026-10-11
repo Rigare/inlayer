@@ -8,6 +8,7 @@ import trimesh
 
 import inlayer
 from inlayer import Config
+from tests.conftest import binary_stl
 
 
 class TestPrepareFigureErrors:
@@ -32,6 +33,32 @@ class TestPrepareFigureErrors:
         path.write_bytes(content)
         with pytest.raises(ValueError, match="broken.stl.*no triangles"):
             inlayer.prepare_figure(str(path))
+
+    @pytest.mark.parametrize("value", [np.nan, np.inf])
+    def test_file_of_non_finite_coordinates_names_the_file(self, tmp_path, value):
+        """trimesh drops every vertex of such a file and keeps its faces: the
+        emptiness check passed and the first look at the bounds raised
+        `IndexError: index 0 is out of bounds for axis 0 with size 0`."""
+        path = tmp_path / "broken.stl"
+        path.write_bytes(binary_stl(np.full((12, 3, 3), value)))
+        with pytest.raises(ValueError, match="broken.stl.*no triangles"):
+            inlayer.prepare_figure(str(path))
+
+    @pytest.mark.parametrize(
+        "triangles",
+        [[[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]],
+         np.ones((12, 3, 3)),
+         [[[k, 0, 0], [k + 1, 0, 0], [k + 2, 0, 0]] for k in range(12)]],
+        ids=["flat-square", "collapsed-to-a-point", "collinear"],
+    )
+    def test_file_without_volume_names_the_file(self, tmp_path, fast_test_config, triangles):
+        """Triangles, but nothing the repair could close into a solid: it
+        returned an empty mesh and the voxelizer failed on it with `zero-size
+        array to reduction operation minimum which has no identity`."""
+        path = tmp_path / "sheet.stl"
+        path.write_bytes(binary_stl(triangles))
+        with pytest.raises(ValueError, match="sheet.stl has no volume"):
+            inlayer.prepare_figure(str(path), fast_test_config)
 
     def test_oversized_grid_is_refused_up_front(self, cube_stl_path):
         """A small file scaled up must fail with a message, not exhaust memory."""

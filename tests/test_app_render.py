@@ -22,6 +22,7 @@ from streamlit.testing.v1 import AppTest
 
 import i18n
 import inlayer
+from tests.conftest import binary_stl
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
@@ -72,6 +73,14 @@ class TestUploadRobustness:
         """One empty upload used to crash the preview of every file (review B18)."""
         at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("empty.stl", b"")])
         assert any("empty.stl" in w.value for w in at.warning)
+        assert list(_trace_extents(at)) == ["a.stl"]
+
+    def test_file_of_nan_coordinates_is_skipped_too(self):
+        """It loaded as a mesh with faces and no vertices: the preview raised
+        an IndexError and drew no chart for any upload."""
+        nan_stl = binary_stl(np.full((12, 3, 3), np.nan))
+        at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("nan.stl", nan_stl)])
+        assert any("nan.stl" in w.value for w in at.warning)
         assert list(_trace_extents(at)) == ["a.stl"]
 
 

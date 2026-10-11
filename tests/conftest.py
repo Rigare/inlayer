@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import struct
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import trimesh
 
@@ -30,6 +32,15 @@ def _pin_language(monkeypatch):
     monkeypatch.setenv(i18n.ENV_VAR, "en")
     i18n.set_language("en")
     yield
+
+
+def binary_stl(triangles) -> bytes:
+    """A binary STL of exactly these triangles ((n, 3, 3) coordinates), written
+    by hand: trimesh's exporter would not let NaN or collapsed triangles through."""
+    data = bytes(80) + struct.pack("<I", len(triangles))
+    for triangle in np.asarray(triangles, dtype=float):
+        data += struct.pack("<12fH", 0.0, 0.0, 0.0, *triangle.ravel(), 0)
+    return data
 
 
 @pytest.fixture(scope="session")
