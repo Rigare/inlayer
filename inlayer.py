@@ -980,7 +980,8 @@ def build_inlay(
     )
     corners = arrange_footprints(
         hi[:, :2] - lo[:, :2], config.effective_figure_gap, config.layout_style,
-        sort_keys, config.box_width, margin=wall,
+        # A cylinder has no width to fill: box_width is the cuboid's alone
+        sort_keys, config.box_width if config.box_shape == "box" else None, margin=wall,
     )
     slots = np.zeros((n, 3))
     slots[:, :2] = corners - lo[:, :2]

@@ -249,6 +249,21 @@ class TestBuildInlayCylinder:
         assert w == pytest.approx(manual, abs=1e-6)
         assert d == pytest.approx(manual, abs=1e-6)
 
+    def test_box_width_and_depth_do_not_touch_a_cylinder(self, dilated_cube, dilated_sphere, fast_test_config):
+        """box_width is documented as "cuboid only", but it set the row width
+        of the compact layout whatever the shape: these four figures came out
+        in a single column and a cylinder half as wide again."""
+        cylinder = dataclasses.replace(fast_test_config, box_shape="cylinder")
+        figs = [dilated_cube, dilated_sphere, dilated_cube, dilated_sphere]
+        plain = inlayer.build_inlay(figs, cylinder)
+        with_dims = inlayer.build_inlay(
+            figs, dataclasses.replace(cylinder, box_width=20.0, box_depth=20.0)
+        )
+        assert with_dims[1:] == pytest.approx(plain[1:])
+        np.testing.assert_allclose(
+            with_dims[0].metadata["placements"], plain[0].metadata["placements"]
+        )
+
     def test_undersized_diameter_emits_warning(self, dilated_cube, fast_test_config, capsys):
         cfg = Config(
             voxel_pitch=fast_test_config.voxel_pitch,
