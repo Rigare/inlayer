@@ -1154,36 +1154,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help=t_("cli.scale", default=Config.stl_unit_to_mm)
     )
     parser.add_argument(
-        "--box-shape", choices=["box", "cylinder"], default="box",
-        help=t_("cli.box_shape")
+        "--box-shape", choices=["box", "cylinder"], default=Config.box_shape,
+        help=t_("cli.box_shape", default=Config.box_shape)
     )
     parser.add_argument(
-        "--box-diameter", type=float, default=None,
+        "--box-diameter", type=float, default=Config.box_diameter,
         help=t_("cli.box_diameter")
     )
     parser.add_argument(
-        "--box-width", type=float, default=None,
+        "--box-width", type=float, default=Config.box_width,
         help=t_("cli.box_width")
     )
     parser.add_argument(
-        "--box-depth", type=float, default=None,
+        "--box-depth", type=float, default=Config.box_depth,
         help=t_("cli.box_depth")
     )
     parser.add_argument(
-        "--box-height", type=float, default=None,
+        "--box-height", type=float, default=Config.box_height,
         help=t_("cli.box_height")
     )
     parser.add_argument(
-        "--offset-x", type=float, default=0.0,
-        help=t_("cli.offset_x")
+        "--offset-x", type=float, default=Config.offset_x,
+        help=t_("cli.offset_x", default=Config.offset_x)
     )
     parser.add_argument(
-        "--offset-y", type=float, default=0.0,
-        help=t_("cli.offset_y")
+        "--offset-y", type=float, default=Config.offset_y,
+        help=t_("cli.offset_y", default=Config.offset_y)
     )
     parser.add_argument(
-        "--offset-z", type=float, default=0.0,
-        help=t_("cli.offset_z")
+        "--offset-z", type=float, default=Config.offset_z,
+        help=t_("cli.offset_z", default=Config.offset_z)
     )
     parser.add_argument(
         "--rot-x", type=float, default=0.0,
@@ -1198,12 +1198,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help=t_("cli.rot_z")
     )
     parser.add_argument(
-        "--figure-gap", type=float, default=None,
+        "--figure-gap", type=float, default=Config.figure_gap,
         help=t_("cli.figure_gap")
     )
     parser.add_argument(
-        "--layout-style", choices=["compact", "horizontal", "vertical"], default="compact",
-        help=t_("cli.layout_style")
+        "--layout-style", choices=["compact", "horizontal", "vertical"],
+        default=Config.layout_style,
+        help=t_("cli.layout_style", default=Config.layout_style)
     )
     parser.add_argument(
         "--finger-recesses", action="store_true",
@@ -1215,7 +1216,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--finger-recess-axis", choices=["x", "y"], default=Config.finger_recess_axis,
-        help=t_("cli.finger_recess_axis")
+        help=t_("cli.finger_recess_axis", default=Config.finger_recess_axis)
     )
     parser.add_argument(
         "--finger-recess-z-offset", type=float, default=Config.finger_recess_z_offset,

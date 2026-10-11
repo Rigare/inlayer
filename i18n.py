@@ -837,8 +837,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Minimum wall thickness in mm (default: {default})",
     },
     "cli.depth_fraction": {
-        "de": "Tiefe des Einlegers relativ zur Figur (0.0-1.0, Standard: {default})",
-        "en": "Insert depth relative to the figure (0.0-1.0, default: {default})",
+        "de": "Tiefe des Einlegers relativ zur Figur (größer 0 bis 1.0, Standard: {default})",
+        "en": "Insert depth relative to the figure (above 0 up to 1.0, default: {default})",
     },
     "cli.voxel_pitch": {
         "de": "Auflösung des Voxelgitters in mm (Standard: {default})",
@@ -853,8 +853,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Scale factor: 1.0=mm, 0.1=0.1mm, 25.4=inch (default: {default})",
     },
     "cli.box_shape": {
-        "de": "Form der Box: 'box' (Quader) oder 'cylinder' (Zylinder) (Standard: 'box')",
-        "en": "Box shape: 'box' (cuboid) or 'cylinder' (default: 'box')",
+        "de": "Form der Box: 'box' (Quader) oder 'cylinder' (Zylinder) (Standard: '{default}')",
+        "en": "Box shape: 'box' (cuboid) or 'cylinder' (default: '{default}')",
     },
     "cli.box_diameter": {
         "de": "Manueller Zylinder-Durchmesser in mm, nur bei --box-shape cylinder (Standard: automatisch)",
@@ -873,16 +873,16 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Manual box height (Z) in mm (default: automatic)",
     },
     "cli.offset_x": {
-        "de": "Manuelle X-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual X offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle X-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual X offset of the figure(s) in mm (default: {default})",
     },
     "cli.offset_y": {
-        "de": "Manuelle Y-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual Y offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle Y-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual Y offset of the figure(s) in mm (default: {default})",
     },
     "cli.offset_z": {
-        "de": "Manuelle Z-Verschiebung der Figur(en) in mm (Standard: 0.0)",
-        "en": "Manual Z offset of the figure(s) in mm (default: 0.0)",
+        "de": "Manuelle Z-Verschiebung der Figur(en) in mm (Standard: {default})",
+        "en": "Manual Z offset of the figure(s) in mm (default: {default})",
     },
     "cli.rot_x": {
         "de": "Manuelle X-Rotation der Figur(en) in Grad (Standard: 0.0)",
@@ -901,8 +901,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Gap between figures in mm (default: wall_thickness)",
     },
     "cli.layout_style": {
-        "de": "Anordnungsmethode bei mehreren Figuren: 'compact', 'horizontal', 'vertical' (Standard: 'compact')",
-        "en": "Arrangement for multiple figures: 'compact', 'horizontal', 'vertical' (default: 'compact')",
+        "de": "Anordnungsmethode bei mehreren Figuren: 'compact', 'horizontal', 'vertical' (Standard: '{default}')",
+        "en": "Arrangement for multiple figures: 'compact', 'horizontal', 'vertical' (default: '{default}')",
     },
     "cli.finger_recesses": {
         "de": "Fingermulden (Entnahmehilfe) links/rechts jeder Figur aktivieren",
@@ -913,8 +913,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Radius of the finger recesses in mm (default: {default})",
     },
     "cli.finger_recess_axis": {
-        "de": "Achse der Fingermulden: 'x' (links/rechts) oder 'y' (vorne/hinten) (Standard: 'x')",
-        "en": "Axis of the finger recesses: 'x' (left/right) or 'y' (front/back) (default: 'x')",
+        "de": "Achse der Fingermulden: 'x' (links/rechts) oder 'y' (vorne/hinten) (Standard: '{default}')",
+        "en": "Axis of the finger recesses: 'x' (left/right) or 'y' (front/back) (default: '{default}')",
     },
     "cli.finger_recess_z_offset": {
         "de": "Absenkung der Fingermulden unter die Box-Oberkante in mm (Standard: {default})",

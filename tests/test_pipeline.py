@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import subprocess
 import sys
@@ -358,6 +359,34 @@ class TestCLI:
         assert result.returncode == 2
         assert message in result.stderr
         assert "Traceback" not in result.stderr
+
+
+class TestCLIDefaults:
+    """The parser starts from Config's defaults, like the web app's widgets.
+
+    Five flags carried literals of their own ("box", 0.0, "compact") and the
+    help texts a third copy of them; nothing compared either with Config.
+    """
+
+    ARG_OF = {"stl_unit_to_mm": "scale", "enable_finger_recesses": "finger_recesses",
+              "enable_parallel": "parallel"}
+
+    def test_parser_defaults_are_configs_defaults(self):
+        args = inlayer._build_parser().parse_args([])
+        cfg = inlayer.Config()
+        for field in dataclasses.fields(cfg):
+            if field.name == "finger_recess_position":
+                continue  # None on the command line means "not given"; main() falls back to Config
+            assert getattr(args, self.ARG_OF.get(field.name, field.name)) == getattr(cfg, field.name), field.name
+
+    def test_help_quotes_configs_defaults(self, capsys):
+        code, out, _ = run_main(capsys, "--help")
+        cfg = inlayer.Config()
+        text = " ".join(out.split())  # argparse wraps the lines
+        assert code == 0
+        for expected in (f"(default: '{cfg.box_shape}')", f"(default: '{cfg.layout_style}')",
+                         f"(default: '{cfg.finger_recess_axis}')", f"X offset of the figure(s) in mm (default: {cfg.offset_x})"):
+            assert expected in text, expected
 
 
 class TestCLIRecessPositionNote:
