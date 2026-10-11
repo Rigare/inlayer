@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import subprocess
 import sys
@@ -580,8 +581,14 @@ class TestCLIErrors:
         assert "missing.stl" in err
         assert "[1/4]" not in out
 
-    @pytest.mark.parametrize("target", ["no_such_dir/inlay.stl", "."])
+    @pytest.mark.parametrize("target", [
+        "no_such_dir/inlay.stl", ".",
+        # root may write to a read-only file - the test stage of the Dockerfile runs as root
+        pytest.param("read_only.stl", marks=pytest.mark.skipif(
+            getattr(os, "geteuid", lambda: 1)() == 0, reason="root ignores file permissions")),
+    ])
     def test_output_path_is_checked_before_the_work(self, cube_stl_path, tmp_path, capsys, target):
+        (tmp_path / "read_only.stl").touch(mode=0o444)
         code, out, err = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / target, *FAST)
         assert code == 2
         assert "Cannot write the output file" in err
