@@ -60,6 +60,33 @@ class TestDilateConfig:
 
 
 
+class TestMemory:
+    """dilate and the cutters voxelize what marching cubes produced, at half
+    the pitch at that: trimesh's voxelizer split every triangle into 64 for it.
+    dilate was the memory peak of a whole run - 950 MB for this 30 mm cube,
+    3.8 GB for one of 60 mm, more than 10 GB for one of 100 mm."""
+
+    @staticmethod
+    def _peak_mb(fn) -> float:
+        import tracemalloc
+
+        tracemalloc.start()
+        fn()
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return peak / 1024**2
+
+    def test_default_run_stays_near_the_grid(self, tmp_path):
+        cfg = Config()
+        path = tmp_path / "cube30.stl"
+        trimesh.creation.box(extents=[30.0, 30.0, 30.0]).export(file_obj=str(path), file_type="stl")
+        prepared = inlayer.prepare_figure(str(path), cfg)
+        dilated = []
+        assert self._peak_mb(lambda: dilated.append(inlayer.dilate(prepared, cfg.clearance, cfg))) < 200
+        # build_inlay voxelizes the dilated figure once more for its cutter (260 MB)
+        assert self._peak_mb(lambda: inlayer.build_inlay(dilated[0], cfg)) < 150
+
+
 class TestGridLimit:
     """The grid bound is checked on the mesh dilate voxelizes, not on the upload.
 

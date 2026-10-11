@@ -80,10 +80,11 @@ class TestPrepareFigureKeepsEveryShell:
 
 
 class TestVoxelizeSurface:
-    """_voxelize_surface replaces trimesh's subdivision voxelizer for raw input.
+    """_voxelize_surface replaces trimesh's subdivision voxelizer in every step.
 
     trimesh quarters each triangle until all edges are below pitch / 2, so a
-    long, thin triangle costs (length / pitch)² however little area it has.
+    long, thin triangle costs (length / pitch)² however little area it has -
+    and a fine mesh is still split into 16 or 64 triangles each.
     """
 
     @staticmethod
@@ -129,6 +130,33 @@ class TestVoxelizeSurface:
         tracemalloc.stop()
         assert peak < 200 * 1024**2
         assert vox.matrix.shape[2] >= 120 / 0.4
+
+    def test_batching_does_not_change_the_grid(self, monkeypatch):
+        """The samples are marked batch by batch; where a batch ends - between
+        two triangles, two rows or in the middle of a segment - must not show."""
+        mesh = trimesh.creation.icosphere(subdivisions=3, radius=10.0)
+        mesh.apply_transform(trimesh.transformations.euler_matrix(0.3, 0.5, 0.7))
+        whole = inlayer._voxelize_surface(mesh, 0.5)
+        monkeypatch.setattr(inlayer, "_SURFACE_SAMPLE_BATCH", 7)
+        in_pieces = inlayer._voxelize_surface(mesh, 0.5)
+        np.testing.assert_array_equal(whole.matrix, in_pieces.matrix)
+        np.testing.assert_array_equal(whole.transform, in_pieces.transform)
+
+    def test_memory_follows_the_grid_not_the_surface_area(self):
+        """Ten plates of 100 x 100 mm stacked within 20 mm: a grid of 1.5 MB
+        under 2000 cm² of surface. All samples at once took 590 MB - a 12 kB
+        STL far below the grid limit."""
+        import tracemalloc
+
+        plates = [trimesh.creation.box(extents=[100.0, 100.0, 0.05]) for _ in range(10)]
+        for k, plate in enumerate(plates):
+            plate.apply_translation([0.0, 0.0, 2.0 * k])
+        tracemalloc.start()
+        vox = inlayer._voxelize_surface(trimesh.util.concatenate(plates), 0.5)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert peak < 80 * 1024**2
+        assert vox.matrix.shape == (201, 201, 37)
 
     def test_low_poly_bar_no_longer_aborts(self, tmp_path):
         """A 12-triangle 250 mm bar ended in 'max_iter exceeded' (review B16)."""

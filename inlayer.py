@@ -31,7 +31,7 @@ import i18n
 from i18n import t as t_
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields
-from typing import Callable, Final, Any, Iterable, TypeVar, cast
+from typing import Callable, Final, Any, Iterable, Iterator, TypeVar, cast
 from manifold3d import Manifold, Mesh, OpType
 from scipy.ndimage import (
     binary_closing,
@@ -354,6 +354,12 @@ MAX_GRID_VOXELS: Final[int] = 1_000_000_000
 # subdivision voxelizer gives with its pitch / 2 edge limit.
 _SURFACE_SAMPLE_SPACING: Final[float] = 0.4
 
+# `_voxelize_surface` never holds more than this many triangles, rows or sample
+# points at a time (roughly 200 bytes each across the arrays of one batch), so
+# its memory stays flat however large or finely tessellated the mesh is. All
+# samples at once cost gigabytes for a figure of 60 mm.
+_SURFACE_SAMPLE_BATCH: Final[int] = 100_000
+
 
 def _check_grid_size(extents: Any, pitch: float, name: str | None) -> None:
     """Refuses a figure whose voxel grid at `pitch` would exceed MAX_GRID_VOXELS."""
@@ -373,13 +379,20 @@ def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
     return np.where(t == 1.0, r, p + t * (r - p))
 
 
-def _segment_points(p0: np.ndarray, p1: np.ndarray, spacing: float) -> np.ndarray:
-    """Evenly spaced points on each segment p0[i]-p1[i], endpoints included."""
+def _segment_batches(p0: np.ndarray, p1: np.ndarray, spacing: float) -> Iterator[np.ndarray]:
+    """Evenly spaced points on each segment p0[i]-p1[i], endpoints included.
+
+    Yields them in batches of at most _SURFACE_SAMPLE_BATCH points; a batch may
+    end in the middle of a segment, so one very long segment is no exception.
+    """
     count = np.ceil(np.linalg.norm(p1 - p0, axis=1) / spacing).astype(np.int64) + 1
-    seg = np.repeat(np.arange(len(p0)), count)
-    step = np.arange(len(seg)) - np.repeat(np.cumsum(count) - count, count)
-    q = step / np.maximum(count[seg] - 1, 1)
-    return _lerp(p0[seg], p1[seg], q[:, None])
+    first = np.cumsum(count) - count  # index of each segment's first point
+    total = int(count.sum())
+    for begin in range(0, total, _SURFACE_SAMPLE_BATCH):
+        k = np.arange(begin, min(begin + _SURFACE_SAMPLE_BATCH, total))
+        seg = np.searchsorted(first, k, side="right") - 1
+        q = (k - first[seg]) / np.maximum(count[seg] - 1, 1)
+        yield _lerp(p0[seg], p1[seg], q[:, None])
 
 
 def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
@@ -389,38 +402,64 @@ def _voxelize_surface(mesh: trimesh.Trimesh, pitch: float) -> Any:
     shorter than pitch / 2: a long, thin triangle (CAD exports of rods, pins,
     profiles) costs (length / pitch)² sub-triangles however little area it has.
     A 256-triangle rod of 40 mm took 1.95 GB, a 12-triangle 250 mm bar aborted
-    with "max_iter exceeded". Here each triangle is sampled in rows parallel to
-    its longest edge instead, plus its three edges; see _SURFACE_SAMPLE_SPACING
-    for why the shell stays closed. Only for raw input meshes - the later steps
-    voxelize marching-cubes output whose edges are about one pitch long.
+    with "max_iter exceeded" - and on a fine mesh every triangle is still split
+    into 16 or 64, which made dilate the memory peak of a whole run. Here each
+    triangle is sampled in rows parallel to its longest edge instead, plus its
+    three edges; see _SURFACE_SAMPLE_SPACING for why the shell stays closed.
+
+    The samples are marked batch by batch (_SURFACE_SAMPLE_BATCH), so beyond
+    the grid itself the memory does not depend on the mesh.
     """
-    tri = mesh.triangles
-    n = len(tri)
+    if len(mesh.faces) == 0:
+        raise ValueError(t_("error.empty_meshes"))
     spacing = _SURFACE_SAMPLE_SPACING * pitch
-    lengths = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2)
-    # Rotate every triangle so that a-b is its longest edge: the apex c then
-    # projects onto a-b, so every row parallel to a-b stays inside the triangle.
-    order = (lengths.argmax(axis=1)[:, None] + np.arange(3)) % 3
-    a, b, c = (tri[np.arange(n), order[:, k]] for k in range(3))
-    longest = lengths.max(axis=1)
-    height = np.linalg.norm(np.cross(b - a, c - a), axis=1) / np.maximum(longest, 1e-12)
+    # One voxel of margin: an interior sample may land an ulp outside the
+    # vertices' range. The grid is cropped to the voxels actually hit below.
+    low = np.floor(mesh.bounds[0] / pitch).astype(np.int64) - 1
+    high = np.ceil(mesh.bounds[1] / pitch).astype(np.int64) + 1
+    matrix = np.zeros(high - low + 1, dtype=bool)
 
-    n_rows = np.ceil(height / spacing).astype(np.int64) + 1
-    row_tri = np.repeat(np.arange(n), n_rows)
-    row = np.arange(len(row_tri)) - np.repeat(np.cumsum(n_rows) - n_rows, n_rows)
-    s = (row / np.maximum(n_rows[row_tri] - 1, 1))[:, None]
-    ra, rb, rc = a[row_tri], b[row_tri], c[row_tri]
-    points = np.concatenate([
-        _segment_points(_lerp(ra, rc, s), _lerp(rb, rc, s), spacing),
-        _segment_points(b, c, spacing),
-        _segment_points(c, a, spacing),
-    ])
+    def mark(p0: np.ndarray, p1: np.ndarray) -> None:
+        for points in _segment_batches(p0, p1, spacing):
+            # Same rounding as trimesh.voxel.creation.voxelize_subdivide
+            hit = np.round(points / pitch).astype(np.int64) - low
+            matrix[hit[:, 0], hit[:, 1], hit[:, 2]] = True
 
-    # Same rounding as trimesh.voxel.creation.voxelize_subdivide
-    hit = np.round(points / pitch).astype(np.int64)
-    origin = hit.min(axis=0)
-    matrix = np.zeros(hit.max(axis=0) - origin + 1, dtype=bool)
-    matrix[tuple((hit - origin).T)] = True
+    vertices, faces = mesh.vertices, mesh.faces
+    for block in range(0, len(faces), _SURFACE_SAMPLE_BATCH):
+        tri = vertices[faces[block:block + _SURFACE_SAMPLE_BATCH]]
+        n = len(tri)
+        lengths = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2)
+        # Rotate every triangle so that a-b is its longest edge: the apex c then
+        # projects onto a-b, so every row parallel to a-b stays inside the triangle.
+        order = (lengths.argmax(axis=1)[:, None] + np.arange(3)) % 3
+        a, b, c = (tri[np.arange(n), order[:, k]] for k in range(3))
+        longest = lengths.max(axis=1)
+        height = np.linalg.norm(np.cross(b - a, c - a), axis=1) / np.maximum(longest, 1e-12)
+        n_rows = np.ceil(height / spacing).astype(np.int64) + 1
+        mark(b, c)
+        mark(c, a)
+
+        # The rows of as many triangles at a time as fit the batch size (a
+        # single tall triangle may exceed it; its rows are bounded by the grid)
+        rows_through = np.cumsum(n_rows)
+        i = 0
+        while i < n:
+            done = int(rows_through[i - 1]) if i else 0
+            j = max(i + 1, int(np.searchsorted(
+                rows_through, done + _SURFACE_SAMPLE_BATCH, side="right")))
+            rows = n_rows[i:j]
+            row_tri = np.repeat(np.arange(i, j), rows)
+            row = np.arange(len(row_tri)) - np.repeat(rows_through[i:j] - rows - done, rows)
+            s = (row / np.maximum(n_rows[row_tri] - 1, 1))[:, None]
+            ra, rb, rc = a[row_tri], b[row_tri], c[row_tri]
+            mark(_lerp(ra, rc, s), _lerp(rb, rc, s))
+            i = j
+
+    used = [np.flatnonzero(matrix.any(axis=tuple(k for k in range(3) if k != axis)))
+            for axis in range(3)]
+    origin = low + np.array([u[0] for u in used])
+    matrix = matrix[tuple(slice(u[0], u[-1] + 1) for u in used)]
     transform = trimesh.transformations.scale_and_translate(
         scale=pitch, translate=origin * pitch
     )
@@ -538,7 +577,7 @@ def dilate(
     _check_grid_size(mesh.extents + 2 * iters * pitch, pitch, name)
 
     t = _log(t_("pipeline.voxelize_dilation", pitch=pitch))
-    vox = cast(Any, mesh.voxelized(pitch=pitch))
+    vox = _voxelize_surface(mesh, pitch)
     vox.fill()
     _log(t_("pipeline.grid_ready"), t)
 
@@ -673,7 +712,7 @@ def _solidify_figure(
     # The grid reaches from the figure's underside up to top_z, however far a
     # manual Z offset has pushed that.
     _check_grid_size([hi[0] - lo[0], hi[1] - lo[1], max(hi[2], top_z) - lo[2]], pitch, name)
-    sol_vox = cast(Any, fig.voxelized(pitch=pitch))
+    sol_vox = _voxelize_surface(fig, pitch)
     matrix = sol_vox.matrix
     # Extend the grid upwards only - the origin sits at the bottom, so the
     # transform stays valid (no _padded_transform: the padding is one-sided).
