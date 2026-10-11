@@ -1222,8 +1222,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=t_("cli.finger_recess_z_offset", default=Config.finger_recess_z_offset)
     )
     parser.add_argument(
-        "--finger-recess-position", type=float, nargs="+",
-        default=[Config.finger_recess_position],
+        # None rather than the default value: main() has to tell "not given"
+        # from "given as 0.0" to say when the flag has no effect
+        "--finger-recess-position", type=float, nargs="+", default=None,
         metavar="P",
         help=t_("cli.finger_recess_position", default=Config.finger_recess_position)
     )
@@ -1274,18 +1275,19 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(t_("config.must_be_finite", name=name, value=getattr(args, name)))
     # One recess position applies to every figure, otherwise one per input
     # file - only checked when recesses are on, the flag does nothing else.
-    recess_positions = list(args.finger_recess_position)
+    recess_positions = args.finger_recess_position or [Config.finger_recess_position]
     for value in recess_positions:
         if not -1.0 <= value <= 1.0:
             parser.error(t_("config.bad_finger_position", value=value))
     if len(recess_positions) == 1:
         recess_positions = recess_positions * len(input_paths)
-    elif len(recess_positions) != len(input_paths):
-        if args.finger_recesses:
-            parser.error(
-                t_("cli.error.recess_position_count",
-                   given=len(recess_positions), n=len(input_paths))
-            )
+    elif args.finger_recesses and len(recess_positions) != len(input_paths):
+        parser.error(
+            t_("cli.error.recess_position_count",
+               given=len(recess_positions), n=len(input_paths))
+        )
+    if args.finger_recess_position is not None and not args.finger_recesses:
+        # Whatever was passed - the note used to appear for a wrong count only
         print(t_("cli.recess_position_ignored"))
     try:
         config = Config(

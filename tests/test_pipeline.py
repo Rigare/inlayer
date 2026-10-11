@@ -360,6 +360,29 @@ class TestCLI:
         assert "Traceback" not in result.stderr
 
 
+class TestCLIRecessPositionNote:
+    """Positions without --finger-recesses do nothing, and the CLI says so.
+
+    README promised that note for every such call; it was printed only when
+    the number of values did not fit the number of files.
+    """
+
+    @pytest.mark.parametrize("positions", [["0.5"], ["0.1", "0.2", "0.3"]])
+    def test_note_whenever_positions_are_given_without_recesses(self, cube_stl_path, tmp_path, capsys, positions):
+        code, out, _ = run_main(
+            capsys, "-i", cube_stl_path, "-o", tmp_path / "inlay.stl", *FAST,
+            "--finger-recess-position", *positions,
+        )
+        assert code == 0
+        assert "--finger-recess-position is ignored without --finger-recesses" in out
+
+    @pytest.mark.parametrize("extra", [[], ["--finger-recesses", "--finger-recess-position", "0.5"]])
+    def test_no_note_otherwise(self, cube_stl_path, tmp_path, capsys, extra):
+        code, out, _ = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / "inlay.stl", *FAST, *extra)
+        assert code == 0
+        assert "ignored" not in out
+
+
 class TestCLIErrors:
     """Whatever stops a run is one line on stderr and an exit code.
 
