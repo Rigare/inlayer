@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import argparse
 import io
 import math
 import sys
@@ -1108,18 +1109,8 @@ def describe_violation(violation: dict, names: list[str]) -> str:
 
 
 # --- CLI --------------------------------------------------------------------
-if __name__ == "__main__":
-    import argparse
-
-    # Die Sprache muss vor dem Parserbau feststehen: argparse wertet die
-    # Hilfetexte schon beim Hinzufuegen der Argumente aus, ein spaeter
-    # geparstes --lang kaeme dafuer zu spaet. Deshalb wird die Option vorab aus
-    # sys.argv gefischt; ohne Angabe entscheidet INLAYER_LANG.
-    _pre = argparse.ArgumentParser(add_help=False)
-    _pre.add_argument("--lang", choices=sorted(i18n.LANGUAGES))
-    _pre_args, _ = _pre.parse_known_args()
-    i18n.set_language(_pre_args.lang or i18n.language_from_env())
-
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI's argument parser, its help texts in the current language."""
     parser = argparse.ArgumentParser(description=t_("cli.description"))
     parser.add_argument(
         "--lang", choices=sorted(i18n.LANGUAGES), default=None,
@@ -1236,8 +1227,27 @@ if __name__ == "__main__":
         "--parallel", action="store_true",
         help=t_("cli.parallel", workers=MAX_PARALLEL_WORKERS)
     )
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    """Runs the CLI on `argv` (default: sys.argv[1:]) and returns its exit code.
+
+    Usage errors leave through argparse with SystemExit(2). A function rather
+    than code under `__main__`, so the tests can run the entry point in-process
+    and measure what it writes.
+    """
+    # The language has to be known before the parser is built: argparse
+    # evaluates the help texts while the arguments are added, a --lang parsed
+    # later would come too late for them. So the option is fished out of argv
+    # up front; without it INLAYER_LANG decides.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", choices=sorted(i18n.LANGUAGES))
+    pre_args, _ = pre.parse_known_args(argv)
+    i18n.set_language(pre_args.lang or i18n.language_from_env())
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     input_paths = args.input
 
     # Everything that can be rejected is rejected here, before minutes of
@@ -1331,6 +1341,8 @@ if __name__ == "__main__":
         print(t_("cli.check_failed", path=args.output, code=EXIT_CHECK_FAILED))
 
     print("\n" + t_("cli.total_time", seconds=f"{time.perf_counter() - t_total:.1f}"))
-    if not stats_3d["passes_min_wall"]:
-        sys.exit(EXIT_CHECK_FAILED)
+    return 0 if stats_3d["passes_min_wall"] else EXIT_CHECK_FAILED
 
+
+if __name__ == "__main__":
+    sys.exit(main())

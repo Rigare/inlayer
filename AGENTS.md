@@ -62,6 +62,7 @@ High-signal context for OpenCode sessions in this repo.
 - **`build_inlay` never rotates.** Rotations are applied in step 1 via `apply_euler_rotation` and are already baked into the meshes handed to `build_inlay`. It used to accept an `individual_rotations` argument that was silently ignored — that parameter is gone; don't reintroduce it.
 - There are **two entry points:**
   - CLI: `python inlayer.py [-i figure.stl] [-o inlay.stl] [-c 0.4] [--lang de] …` — `--lang` is parsed *before* the main parser is built, because argparse renders help strings at construction time; `INLAYER_LANG` is the fallback.
+    The CLI is `inlayer.main(argv)` (parser in `_build_parser()`) and returns its exit code; `__main__` is only `sys.exit(main())`. Keep it that way: code under `__main__` cannot be imported, so the tests could only start it as a subprocess and never looked at the STL it wrote.
   - Web UI: `streamlit run app.py`
 
 ## trimesh 4.x quirk
