@@ -30,6 +30,7 @@ Sprache selbst durchreichen (siehe `inlayer._parallel_map`).
 from __future__ import annotations
 
 import os
+import logging
 from contextvars import ContextVar
 from typing import Final
 
@@ -93,6 +94,7 @@ def t(key: str, /, **kwargs: object) -> str:
     """
     entry = TRANSLATIONS.get(key)
     if entry is None:
+        logging.getLogger("inlayer.i18n").warning("missing translation key: %s", key)
         return key
     text = entry.get(get_language()) or entry.get(DEFAULT_LANGUAGE) or key
     if kwargs:
@@ -454,6 +456,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "app.error.no_input": {
         "de": "Bitte lade eine oder mehrere STL-Dateien in der Sidebar hoch oder lege eine '{path}' im Verzeichnis ab.",
         "en": "Please upload one or more STL files in the sidebar, or place a '{path}' in the working directory.",
+    },
+    "app.error.too_many_files": {
+        "de": "Zu viele Dateien: {n} hochgeladen, maximal {limit} erlaubt.",
+        "en": "Too many files: {n} uploaded, max {limit} allowed.",
     },
     "app.error.failed": {
         "de": "Berechnung fehlgeschlagen: {error}",

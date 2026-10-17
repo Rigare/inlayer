@@ -5,7 +5,8 @@ services:
       # The runtime stage explicitly – not the test stage from the Dockerfile.
       target: runtime
     ports:
-      - "8501:8501"
+      # Localhost only: without auth, an open port is remote compute. Expose via reverse proxy with auth instead.
+      - "127.0.0.1:8501:8501"
     volumes:
       # Only for the CLI inside the container (docker compose exec ... -i data/figure.stl).
       # The web app takes files through the upload dialog and hands the result

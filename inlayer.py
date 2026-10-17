@@ -333,6 +333,8 @@ def load_mesh(source: Any, name: str, file_type: str | None = None) -> trimesh.T
         raise ValueError(t_("error.empty_input", name=name)) from exc
     if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0 or len(mesh.vertices) == 0:
         raise ValueError(t_("error.empty_input", name=name))
+    if not np.all(np.isfinite(mesh.vertices)):
+        raise ValueError(t_("error.empty_input", name=name))
     return mesh
 
 
@@ -366,10 +368,18 @@ _SURFACE_SAMPLE_BATCH: Final[int] = 100_000
 
 def _check_grid_size(extents: Any, pitch: float, name: str | None) -> None:
     """Refuses a figure whose voxel grid at `pitch` would exceed MAX_GRID_VOXELS."""
-    voxels = float(np.prod(np.ceil(np.asarray(extents, dtype=float) / pitch) + 1))
+    # Integer early-exit avoids float rounding slipping just under the limit.
+    voxels = 1
+    for e in np.asarray(extents, dtype=float):
+        if not math.isfinite(e):
+            voxels = MAX_GRID_VOXELS + 1
+            break
+        voxels *= int(math.ceil(e / pitch) + 1)
+        if voxels > MAX_GRID_VOXELS:
+            break
     if voxels > MAX_GRID_VOXELS:
         raise ValueError(t_("error.grid_too_large", name=name or t_("error.unnamed_figure"),
-                            voxels=f"{voxels:.1e}", limit=f"{MAX_GRID_VOXELS:.1e}"))
+                            voxels=f"{float(voxels):.1e}", limit=f"{MAX_GRID_VOXELS:.1e}"))
 
 
 def _lerp(p: np.ndarray, r: np.ndarray, t: np.ndarray) -> np.ndarray:
