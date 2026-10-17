@@ -38,10 +38,22 @@ class TestPrepareFigureErrors:
     def test_file_of_non_finite_coordinates_names_the_file(self, tmp_path, value):
         """trimesh drops every vertex of such a file and keeps its faces: the
         emptiness check passed and the first look at the bounds raised
-        `IndexError: index 0 is out of bounds for axis 0 with size 0`."""
+        `IndexError: index 0 is out of bounds for axis 0 with size 0`. Then it
+        was told it "contains no triangles", which it does."""
         path = tmp_path / "broken.stl"
         path.write_bytes(binary_stl(np.full((12, 3, 3), value)))
-        with pytest.raises(ValueError, match="broken.stl.*no triangles"):
+        with pytest.raises(ValueError, match="broken.stl contains invalid coordinates"):
+            inlayer.prepare_figure(str(path))
+
+    @pytest.mark.parametrize("value", [np.nan, np.inf])
+    def test_one_non_finite_triangle_is_refused(self, tmp_path, value):
+        """trimesh's processing dropped the bad vertex and hung its triangle on
+        vertex 0: the file loaded, with a triangle it does not contain."""
+        cube = trimesh.creation.box(extents=[10, 10, 10])
+        path = tmp_path / "broken.stl"
+        path.write_bytes(binary_stl(np.concatenate(
+            [cube.triangles, [[[0, 0, 0], [1, 0, 0], [value, 1, 0]]]])))
+        with pytest.raises(ValueError, match="broken.stl contains invalid coordinates"):
             inlayer.prepare_figure(str(path))
 
     @pytest.mark.parametrize(
@@ -72,6 +84,37 @@ class TestPrepareFigureErrors:
         cfg = Config(stl_unit_to_mm=1000.0, voxel_pitch=0.2)
         with pytest.raises(ValueError, match="too large"):
             inlayer.prepare_figure(cube_stl_path, cfg)
+
+
+class TestLoadMesh:
+    def test_finite_file_loads_as_trimesh_would_by_default(self, tmp_path):
+        """load_mesh defers trimesh's processing until after its own checks. For
+        a valid file nothing may change - the merged vertices included."""
+        path = tmp_path / "sphere.stl"
+        path.write_bytes(trimesh.creation.icosphere(subdivisions=3).export(file_type="stl"))
+        mesh = inlayer.load_mesh(str(path), "sphere.stl")
+        default = trimesh.load(str(path), force="mesh")
+        np.testing.assert_array_equal(mesh.vertices, default.vertices)
+        np.testing.assert_array_equal(mesh.faces, default.faces)
+
+
+class TestCheckGridSize:
+    """The bound every voxel grid is checked against (MAX_GRID_VOXELS = 1e9)."""
+
+    def test_the_limit_passes_one_layer_more_does_not(self):
+        inlayer._check_grid_size([999.0, 999.0, 999.0], 1.0, "a.stl")  # 1000³ voxels
+        with pytest.raises(ValueError, match="a.stl is too large"):
+            inlayer._check_grid_size([999.0, 999.0, 999.5], 1.0, "a.stl")  # 1000²·1001
+
+    def test_a_nan_extent_is_refused(self):
+        """NaN fails every comparison: `voxels > MAX_GRID_VOXELS` let it through."""
+        with pytest.raises(ValueError, match="a.stl is too large"):
+            inlayer._check_grid_size([10.0, float("nan"), 10.0], 1.0, "a.stl")
+
+    def test_message_counts_the_whole_grid(self):
+        """An early exit after two axes reported 1.0e+10 voxels for this grid."""
+        with pytest.raises(ValueError, match=r"would have 1\.0e\+15 voxels"):
+            inlayer._check_grid_size([1e5, 1e5, 1e5], 1.0, "a.stl")
 
 
 class TestPrepareFigureKeepsEveryShell:

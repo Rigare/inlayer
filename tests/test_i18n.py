@@ -9,6 +9,7 @@ vorhandene Keys sind die Fehler, die sich sonst erst im Betrieb zeigen —
 from __future__ import annotations
 
 import ast
+import logging
 import string
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -199,6 +200,12 @@ class TestTranslate:
 
     def test_unknown_key_returns_key(self):
         assert i18n.t("gibt.es.nicht") == "gibt.es.nicht"
+
+    def test_unknown_key_is_logged(self, caplog):
+        """t() does not raise on a missing key, so the log is where a typo shows."""
+        with caplog.at_level(logging.WARNING, logger="inlayer.i18n"):
+            i18n.t("gibt.es.nicht")
+        assert "missing translation key: gibt.es.nicht" in caplog.text
 
     def test_placeholders_are_filled(self):
         i18n.set_language("en")

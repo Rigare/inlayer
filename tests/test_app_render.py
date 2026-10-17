@@ -20,6 +20,7 @@ import pytest
 import trimesh
 from streamlit.testing.v1 import AppTest
 
+import app_helpers
 import i18n
 import inlayer
 from tests.conftest import binary_stl
@@ -115,6 +116,37 @@ class TestFailedRun:
         assert not at.exception
         assert [e.value for e in at.error] == [i18n.TRANSLATIONS["app.error.unexpected"]["en"]]
         assert "detail from /srv/inlayer/app.py" in caplog.text
+
+
+class TestUploadLimit:
+    """One run takes at most app_helpers.MAX_UPLOAD_FILES uploads."""
+
+    @staticmethod
+    def _files(n: int) -> list[tuple[str, bytes]]:
+        return [(f"f{i}.stl", _stl([10, 10, 10 + i])) for i in range(n)]
+
+    def test_one_file_too_many_stops_before_the_pipeline(self, monkeypatch):
+        def pipeline(*args, **kwargs):
+            raise AssertionError("the pipeline must not start")
+
+        monkeypatch.setattr(inlayer, "build_inlay", pipeline)
+        n = app_helpers.MAX_UPLOAD_FILES + 1
+        at = _upload(_run("en"), self._files(n))
+        at.button[0].click().run()
+        assert not at.exception
+        assert [e.value for e in at.error] == [
+            i18n.t("app.error.too_many_files", n=n, limit=app_helpers.MAX_UPLOAD_FILES)
+        ]
+        assert "result" not in at.session_state
+
+    def test_the_limit_itself_reaches_the_pipeline(self, monkeypatch):
+        def pipeline(*args, **kwargs):
+            raise ValueError("pipeline reached")
+
+        monkeypatch.setattr(inlayer, "build_inlay", pipeline)
+        at = _upload(_run("en"), self._files(app_helpers.MAX_UPLOAD_FILES))
+        at.button[0].click().run()
+        assert [e.value for e in at.error] == [i18n.t("app.error.failed", error="pipeline reached")]
 
 
 class TestRunWithoutUpload:

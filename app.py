@@ -699,7 +699,12 @@ if run_btn:
         file_hashes: list[str] = []
 
         if uploaded_files:
+            if len(uploaded_files) > app_helpers.MAX_UPLOAD_FILES:
+                st.error(t("app.error.too_many_files", n=len(uploaded_files),
+                           limit=app_helpers.MAX_UPLOAD_FILES))
+                st.stop()
             for uf in uploaded_files:
+                # NamedTemporaryFile creates the file with mode 0600 already.
                 with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
                     tmp.write(uf.getvalue())
                     tmp_paths.append(tmp.name)
