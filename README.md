@@ -119,6 +119,10 @@ up to the limit. Oversized uploads are rejected by the server with HTTP 413, so
 raising the limit means raising this option; the file-uploader widget cannot
 exceed it.
 
+A single run takes at most **10 files** (`MAX_UPLOAD_FILES` in
+[`app_helpers.py`](app_helpers.py)). With more, the app shows an error instead
+of starting; split the figures across several runs.
+
 ### 🐳 Docker (optional)
 
 ```bash
@@ -126,13 +130,16 @@ exceed it.
 docker compose up --build
 ```
 
+The bundled `compose.yaml` publishes the port on `127.0.0.1` only, so the app
+is reachable from the machine it runs on and nowhere else. To use it from
+other devices on your network, change the mapping to `"8501:8501"`.
+
 > [!WARNING]
-> The bundled `compose.yaml` is meant for use on your own network: Streamlit
-> listens on `0.0.0.0:8501` without authentication and accepts uploads up to
-> 250 MB. Exposing the container directly to the internet means running an open
-> endpoint that processes untrusted files and consumes CPU and memory. A public
-> instance belongs behind a reverse proxy with authentication, a smaller upload
-> limit, and resource limits.
+> The app has no authentication and accepts uploads up to 250 MB. Opening the
+> port beyond localhost lets anyone who can reach it run untrusted files
+> through a pipeline that consumes CPU and memory. Do that only on a network
+> you trust; a public instance belongs behind a reverse proxy with
+> authentication, a smaller upload limit, and resource limits.
 
 Files enter the web app through the **upload dialog** in the sidebar, and the
 finished inlay leaves through the **download button** — no volume required.
@@ -491,6 +498,7 @@ value as a usage error before any work starts.
 | Parameter / CLI flag | Default | Description |
 |---|---|---|
 | `--server.maxUploadSize` | `250` | Maximum upload size **per file** in MB. Also settable via `STREAMLIT_SERVER_MAX_UPLOAD_SIZE` or `.streamlit/config.toml` |
+| `MAX_UPLOAD_FILES` (in `app_helpers.py`) | `10` | Maximum number of files per run. Not a flag: change it in the code |
 
 ### Performance (optional)
 

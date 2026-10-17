@@ -44,6 +44,13 @@ _HASH_HEX_LEN = 16
 # Face-Budget fuer die Sofort-Vorschau direkt nach dem Upload.
 PREVIEW_FACE_BUDGET = 10000
 
+# Most uploads one run takes. Every figure goes through the whole pipeline with
+# voxel grids of up to inlayer.MAX_GRID_VOXELS, so the count bounds the work a
+# single click can put on a shared container. It does not bound memory: by the
+# time the run starts, Streamlit already holds every upload (each one capped by
+# server.maxUploadSize).
+MAX_UPLOAD_FILES = 10
+
 
 def file_hash(path: str) -> str:
     """SHA256 des Dateiinhalts (erste 16 Zeichen Hex)."""

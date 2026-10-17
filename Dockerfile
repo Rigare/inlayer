@@ -28,13 +28,14 @@ COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY pytest.ini inlayer.py app.py app_helpers.py i18n.py ./
 COPY tests/ ./tests/
-# tests/test_streamlit_config.py reads both of these: the config whose theme and
-# upload limit it pins down, and the Dockerfile itself to verify the runtime
-# stage's COPY line. Without them four tests fail inside the image only - which
-# is exactly the drift the containerised run is meant to catch.
+# tests/test_streamlit_config.py reads all of these: the config whose theme and
+# upload limit it pins down, the Dockerfile itself to verify the runtime
+# stage's COPY line, and compose.yaml for its localhost-only port. Without them
+# those tests fail inside the image only - which is exactly the drift the
+# containerised run is meant to catch.
 # `.dockerignore` keeps the Dockerfile in the context for this reason.
 COPY .streamlit/ ./.streamlit/
-COPY Dockerfile ./
+COPY Dockerfile compose.yaml ./
 RUN python -m pytest -q
 
 

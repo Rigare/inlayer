@@ -29,8 +29,8 @@ Sprache selbst durchreichen (siehe `inlayer._parallel_map`).
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from contextvars import ContextVar
 from typing import Final
 
@@ -812,6 +812,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "error.empty_input": {
         "de": "{name} enthält keine Dreiecke – die Datei ist leer oder keine gültige STL.",
         "en": "{name} contains no triangles – the file is empty or not a valid STL.",
+    },
+    "error.non_finite_input": {
+        "de": "{name} enthält ungültige Koordinaten (NaN oder unendlich) – die Datei ist beschädigt.",
+        "en": "{name} contains invalid coordinates (NaN or infinite) – the file is corrupt.",
     },
     "error.out_of_memory": {
         "de": "Der Arbeitsspeicher reicht für diese Auflösung nicht aus. Wähle einen größeren voxel_pitch.",

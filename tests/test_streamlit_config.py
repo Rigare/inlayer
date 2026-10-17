@@ -40,6 +40,14 @@ def test_theme_stays_dark():
     assert _config()["theme"]["base"] == "dark"
 
 
+def test_compose_publishes_the_port_on_localhost_only():
+    """The app has no authentication: on 0.0.0.0 anyone who reaches the host
+    can run the pipeline. Opening it up is a deliberate edit (see README)."""
+    compose = (_REPO_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    ports = re.findall(r'^\s*-\s*"([^"]*8501[^"]*)"', compose, flags=re.MULTILINE)
+    assert ports == ["127.0.0.1:8501:8501"]
+
+
 def _stages(dockerfile: str) -> dict[str, str]:
     """The Dockerfile split into its stages, by `FROM ... AS <name>`."""
     stages: dict[str, str] = {}

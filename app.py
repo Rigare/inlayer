@@ -699,18 +699,15 @@ if run_btn:
         file_hashes: list[str] = []
 
         if uploaded_files:
-            # Limit number of files: each triggers O(n³) voxel work, 20×250 MB would OOM the 4 GB container.
-            if len(uploaded_files) > 10:
-                st.error(t("app.error.too_many_files", n=len(uploaded_files), limit=10))
+            if len(uploaded_files) > app_helpers.MAX_UPLOAD_FILES:
+                st.error(t("app.error.too_many_files", n=len(uploaded_files),
+                           limit=app_helpers.MAX_UPLOAD_FILES))
                 st.stop()
             for uf in uploaded_files:
+                # NamedTemporaryFile creates the file with mode 0600 already.
                 with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
                     tmp.write(uf.getvalue())
                     tmp_paths.append(tmp.name)
-                try:
-                    os.chmod(tmp_paths[-1], 0o600)
-                except OSError:
-                    pass
                 input_paths.append(tmp_paths[-1])
                 file_names.append(_labels[uf.file_id])
                 file_hashes.append(content_hashes[uf.file_id])
