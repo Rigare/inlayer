@@ -174,9 +174,6 @@ def _mesh3d(mesh: trimesh.Trimesh, **kwargs) -> go.Mesh3d:
     )
 
 
-_scene_layout = app_helpers.scene_layout
-
-
 # --- Logger -----------------------------------------------------------------
 class StreamlitLogger:
     def __init__(self, status_container):
@@ -690,6 +687,7 @@ with col_right:
 
 # --- Pipeline ---------------------------------------------------------------
 if run_btn:
+    st.session_state.pop("result", None)
     tmp_paths: list[str] = []
     try:
         # Input: the uploads, or the default file next to the app
@@ -711,7 +709,7 @@ if run_btn:
                 input_paths.append(tmp_paths[-1])
                 file_names.append(_labels[uf.file_id])
                 file_hashes.append(content_hashes[uf.file_id])
-        elif os.path.exists(fallback_path):
+        elif os.path.isfile(fallback_path):
             input_paths = [fallback_path]
             file_names = [fallback_path]
             file_hashes = [app_helpers.file_hash(fallback_path)]
@@ -819,6 +817,10 @@ if run_btn:
         # Only what the result view reads, as geometry-only copies: the full
         # inlay (and before that the dilated figures) sat in every session's
         # state although the view needs a decimated mesh and a few numbers.
+        # Everything that determines a prepared, rotated figure goes into its
+        # cache key: two figures on the same round base cut the same inlay, so
+        # the inlay's hash alone would draw the other session's figure.
+        max_fig_faces = 15000 if not is_multi else 10000
         st.session_state["result"] = {
             "params": _params_snapshot(),
             "stats_3d": stats_3d,
@@ -835,20 +837,20 @@ if run_btn:
                 app_helpers.preview_copy(r, INLAY_PREVIEW_FACES)
                 for r in inlay.metadata.get("finger_recesses", [])
             ],
-            "fig_meshes": fig_meshes,
-            # Everything that determines a prepared, rotated figure. The inlay's
-            # hash does not: two figures on the same round base cut the same
-            # inlay, and the preview then drew the other session's figure.
-            "fig_cache_keys": [
-                f"{file_hashes[i]}:{scale}:{voxel_pitch}:{decimate_faces}:"
-                + ":".join(str(r) for r in rotations[i])
+            "fig_viz": [
+                _decimated_for_viz(
+                    fig_meshes[i],
+                    f"{file_hashes[i]}:{scale}:{voxel_pitch}:{decimate_faces}:"
+                    + ":".join(str(r) for r in rotations[i]),
+                    max_fig_faces,
+                )
                 for i in range(n_files)
             ],
             "file_names": file_names,
             "is_multi": is_multi,
         }
 
-    except (ValueError, RuntimeError, MemoryError) as e:
+    except (ValueError, RuntimeError, OSError, MemoryError) as e:
         # Raised on purpose, with a message written for the user: an unusable
         # upload, a grid beyond the limit, a box that leaves no material.
         reason = t("error.out_of_memory") if isinstance(e, MemoryError) else e
@@ -877,7 +879,6 @@ if "result" in st.session_state:
     actual_h = res["actual_h"]
     stl_bytes = res["stl_bytes"]
     _wt = res["wall_thickness"]
-    fig_meshes = res["fig_meshes"]
     _file_names = res["file_names"]
     _is_multi = res["is_multi"]
 
@@ -963,20 +964,15 @@ if "result" in st.session_state:
             name=t("app.trace.inlay"), showlegend=True,
         ))
 
-        # One colour per figure
-        max_fig_faces = 15000 if not _is_multi else 10000
-        # Exactly the translation build_inlay applied to each figure. The
-        # prepared figure shares its frame with the dilated one it was given,
-        # so the same translation puts it inside its cavity.
-        for i, fig_m in enumerate(fig_meshes):
-            viz_fig = _decimated_for_viz(fig_m, res["fig_cache_keys"][i], max_fig_faces).copy()
+        # One colour per figure. Exactly the translation build_inlay applied to
+        # each figure puts the prepared figure inside its cavity.
+        for i, viz_m in enumerate(res["fig_viz"]):
+            viz_fig = viz_m.copy()
             viz_fig.apply_translation(res["placements"][i])
 
             color = _fig_colors[i % len(_fig_colors)]
-            label = (_file_names[i] if i < len(_file_names)
-                     else t("app.trace.figure", i=i + 1))
-            if _is_multi:
-                label = t("app.trace.figure_named", i=i + 1, name=label)
+            label = (t("app.trace.figure_named", i=i + 1, name=_file_names[i])
+                     if _is_multi else _file_names[i])
 
             fig_3d.add_trace(_mesh3d(
                 viz_fig, color=color, opacity=0.6, name=label, showlegend=True,
@@ -988,9 +984,13 @@ if "result" in st.session_state:
                 name=t("app.trace.recesses"), showlegend=(r_idx == 0),
             ))
 
-        fig_3d.update_layout(**_scene_layout(650))
+        fig_3d.update_layout(**app_helpers.scene_layout(650))
         st.plotly_chart(fig_3d, width="stretch")
         st.info(t("app.viewer.hint"))
+
+elif len(uploaded_files) > app_helpers.MAX_UPLOAD_FILES:
+    st.error(t("app.error.too_many_files", n=len(uploaded_files),
+               limit=app_helpers.MAX_UPLOAD_FILES))
 
 elif uploaded_files:
     # --- Instant preview: the figures right after the upload -----------------
@@ -1017,6 +1017,6 @@ elif uploaded_files:
                 mesh, color=_fig_colors[i % len(_fig_colors)], opacity=0.9,
                 name=_labels[uf.file_id], showlegend=True,
             ))
-        prev_fig.update_layout(**_scene_layout(650))
+        prev_fig.update_layout(**app_helpers.scene_layout(650))
         plot_box.plotly_chart(prev_fig, width="stretch")
         st.caption(t("app.preview.caption"))

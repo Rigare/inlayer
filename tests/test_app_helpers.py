@@ -217,9 +217,10 @@ class TestLoadPreviewMesh:
         [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2,
          binary_stl(np.full((12, 3, 3), np.nan)),
          binary_stl(np.concatenate([trimesh.creation.box().triangles,
-                                    [[[0, 0, 0], [1, 0, 0], [np.nan, 1, 0]]]]))],
+                                    [[[0, 0, 0], [1, 0, 0], [np.nan, 1, 0]]]])),
+         binary_stl(np.ones((app_helpers.PREVIEW_FACE_BUDGET + 10, 3, 3)))],
         ids=["zero-bytes", "binary-header-only", "ascii-no-facets", "garbage", "all-nan",
-             "one-nan-triangle"],
+             "one-nan-triangle", "decimates-to-empty"],
     )
     def test_empty_or_garbled_upload_names_the_file(self, data):
         """An empty mesh used to crash the preview on `mesh.bounds[0][0]`."""

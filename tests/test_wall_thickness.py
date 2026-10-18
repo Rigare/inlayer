@@ -68,9 +68,11 @@ class TestFindings:
         cfg = Config(voxel_pitch=1.0, decimate_faces=1000, figure_gap=4.0, layout_style="horizontal")
         inlay, w, d, h = _build([dilated_cube, dilated_cube.copy()], cfg,
                                 individual_offsets=[(0, 0, 0), (-3.0, 0, 0)])
-        (finding,) = inlay.metadata["wall_check"]["violations"]
+        check = inlay.metadata["wall_check"]
+        (finding,) = check["violations"]
         assert (finding["kind"], {finding["figure"], finding["other"]}) == ("inner", {0, 1})
         assert finding["measured_mm"] == pytest.approx(gp.inner_gap(inlay, w, d, h), abs=0.01)
+        assert check["min_wall_mm"] == pytest.approx(finding["measured_mm"], abs=1e-4)
         assert finding["target_mm"] == 4.0
 
     def test_merged(self, dilated_cube):
@@ -78,6 +80,7 @@ class TestFindings:
         inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
                            individual_offsets=[(0, 0, 0), (-6.0, 0, 0)])
         assert ("merged", 0) in _kinds(inlay)
+        assert inlay.metadata["wall_check"]["min_wall_mm"] == 0.0
 
     def test_no_cavity(self, dilated_cube):
         """Raised clear of the box: nothing is cut at all. The old check passed
@@ -85,6 +88,16 @@ class TestFindings:
         inlay, *_ = _build([dilated_cube], individual_offsets=[(0.0, 0.0, 30.0)])
         assert _kinds(inlay) == [("no_cavity", 0)]
         assert inlay.metadata["wall_check"]["passes_min_wall"] is False
+        assert inlay.metadata["wall_check"]["min_wall_mm"] == 0.0
+
+    def test_no_cavity_with_finger_recesses(self, dilated_cube):
+        """Recesses stay anchored to the top face; a figure lifted out of the
+        box still leaves no cavity for the figure body."""
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, enable_finger_recesses=True)
+        inlay, *_ = _build([dilated_cube], cfg, individual_offsets=[(0.0, 0.0, 30.0)])
+        assert _kinds(inlay) == [("no_cavity", 0)]
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is False
+        assert inlay.metadata["wall_check"]["min_wall_mm"] == 0.0
 
     def test_sealed(self):
         """build_inlay no longer produces one, so the check is fed by hand."""
@@ -92,6 +105,7 @@ class TestFindings:
         cutter = Manifold.cube((6.0, 6.0, 4.0)).translate((-3.0, -3.0, -7.0))
         check = inlayer._wall_check(box, [cutter], box - cutter, CFG)
         assert [(v["kind"], v["figure"]) for v in check["violations"]] == [("sealed", 0)]
+        assert check["min_wall_mm"] == 0.0
 
     @pytest.mark.parametrize("short_by,passes", [(0.04, True), (0.06, False)])
     def test_tolerance_is_five_hundredths(self, short_by, passes):

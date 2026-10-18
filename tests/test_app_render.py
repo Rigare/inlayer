@@ -117,6 +117,16 @@ class TestFailedRun:
         assert [e.value for e in at.error] == [i18n.TRANSLATIONS["app.error.unexpected"]["en"]]
         assert "detail from /srv/inlayer/app.py" in caplog.text
 
+    def test_failed_run_clears_previous_result(self):
+        """A failed run must not leave the previous run's dashboard on screen."""
+        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10]))])
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert "result" in at.session_state
+        _upload(at, [("sheet.stl", self.SHEET)])
+        at.button[0].click().run()
+        assert "result" not in at.session_state
+
 
 class TestUploadLimit:
     """One run takes at most app_helpers.MAX_UPLOAD_FILES uploads."""
@@ -131,12 +141,13 @@ class TestUploadLimit:
 
         monkeypatch.setattr(inlayer, "build_inlay", pipeline)
         n = app_helpers.MAX_UPLOAD_FILES + 1
+        expected = [i18n.t("app.error.too_many_files", n=n, limit=app_helpers.MAX_UPLOAD_FILES)]
         at = _upload(_run("en"), self._files(n))
+        assert [e.value for e in at.error] == expected
+        assert not at.get("plotly_chart")
         at.button[0].click().run()
         assert not at.exception
-        assert [e.value for e in at.error] == [
-            i18n.t("app.error.too_many_files", n=n, limit=app_helpers.MAX_UPLOAD_FILES)
-        ]
+        assert [e.value for e in at.error] == expected
         assert "result" not in at.session_state
 
     def test_the_limit_itself_reaches_the_pipeline(self, monkeypatch):
@@ -562,6 +573,7 @@ class TestResult:
         """Review N20: the full inlay (with its cavity grid) and the dilated
         figures sat in every session's state."""
         res = self._generate(_two_figures()).session_state["result"]
-        assert not {"inlay", "fig_offsets", "xy_translations", "z_offsets"} & set(res)
+        assert not {"inlay", "fig_meshes", "fig_cache_keys", "fig_offsets", "xy_translations", "z_offsets"} & set(res)
         assert res["inlay_viz"].metadata == {}
+        assert all(m.metadata == {} for m in res["fig_viz"])
         assert len(res["placements"]) == 2

@@ -254,3 +254,22 @@ class TestWallCheckIsHonest:
         check = inlay.metadata["wall_check"]
         assert check["min_wall_mm"] == pytest.approx(measured, abs=0.01)
         assert check["passes_min_wall"] is (measured >= cfg.wall_thickness - TOL)
+
+
+class TestFinishedCavityClearance:
+    """Measures the finished cavity in the inlay against the input figure."""
+
+    def test_flat_wall_clearance_stays_within_documented_voxel_band_and_grows(self, cube_stl_path):
+        gaps = []
+        for clearance in (0.4, 1.4):
+            cfg = _cfg(voxel_pitch=0.5, clearance=clearance)
+            fig = inlayer.prepare_figure(cube_stl_path, cfg)
+            inlay, w, d, h, _ = _build([fig], cfg)
+            (pocket,) = gp.cavities(inlay, w, d, h)
+            lo = pocket.bounding_box()[:3]
+            hi = pocket.bounding_box()[3:]
+            # Per-side XY gap between the 10 mm cube and the finished cavity
+            gaps.append(float(((hi[0] - lo[0]) - 10.0) / 2.0))
+        # At clearance 0.4 and pitch 0.5, README documents 1-2 x pitch per side
+        assert 0.5 - TOL <= gaps[0] <= 1.25 + TOL
+        assert gaps[1] == pytest.approx(gaps[0] + 1.0, abs=0.35)
