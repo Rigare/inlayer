@@ -580,10 +580,6 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Generierter Einleger (Inlay)",
         "en": "Generated insert (inlay)",
     },
-    "app.trace.figure": {
-        "de": "Figur {i}",
-        "en": "Figure {i}",
-    },
     "app.trace.figure_named": {
         "de": "Figur {i} ({name})",
         "en": "Figure {i} ({name})",

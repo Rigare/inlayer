@@ -582,14 +582,15 @@ class TestCLIErrors:
         assert "[1/4]" not in out
 
     @pytest.mark.parametrize("target", [
-        "no_such_dir/inlay.stl", ".",
+        "no_such_dir/inlay.stl", "no_such_dir/", "", ".",
         # root may write to a read-only file - the test stage of the Dockerfile runs as root
         pytest.param("read_only.stl", marks=pytest.mark.skipif(
             getattr(os, "geteuid", lambda: 1)() == 0, reason="root ignores file permissions")),
     ])
     def test_output_path_is_checked_before_the_work(self, cube_stl_path, tmp_path, capsys, target):
         (tmp_path / "read_only.stl").touch(mode=0o444)
-        code, out, err = run_main(capsys, "-i", cube_stl_path, "-o", tmp_path / target, *FAST)
+        out = "" if target == "" else f"{tmp_path}/{target}"
+        code, out, err = run_main(capsys, "-i", cube_stl_path, "-o", out, *FAST)
         assert code == 2
         assert "Cannot write the output file" in err
         assert "[1/4]" not in out

@@ -175,11 +175,14 @@ def load_preview_mesh(data: bytes, scale: float, name: str) -> trimesh.Trimesh:
     mesh = inlayer.load_mesh(io.BytesIO(data), name, file_type="stl")
     if scale != 1.0:
         mesh.apply_scale(scale)
-    return decimate_mesh(mesh, PREVIEW_FACE_BUDGET)
+    mesh = decimate_mesh(mesh, PREVIEW_FACE_BUDGET)
+    if not (mesh.area > 0):
+        raise ValueError(t("error.not_solid", name=name))
+    return mesh
 
 
 def scene_layout(height: int) -> dict:
-    """Gemeinsames Plotly-Layout fuer Vorschau und Ergebnis-Ansicht."""
+    """Shared Plotly layout for preview and result views."""
     return dict(
         template="plotly_dark",
         scene=dict(

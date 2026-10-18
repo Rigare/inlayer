@@ -167,6 +167,10 @@ class TestBuildInlaySignature:
 class TestBuildInlayMultiMesh:
     """Tests fuer Multi-Mesh-Eingabe (Liste von Figuren)."""
 
+    def test_empty_figures_list_raises(self, fast_test_config):
+        with pytest.raises(ValueError, match="At least one mesh"):
+            inlayer.build_inlay([], fast_test_config)
+
     def test_multi_mesh_returns_valid_inlay(self, dilated_cube, dilated_sphere, fast_test_config):
         """Two meshes (unarranged - build_inlay lays them out) give two pockets."""
         inlay, w, d, h = inlayer.build_inlay([dilated_cube, dilated_sphere], fast_test_config)

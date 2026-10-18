@@ -508,7 +508,7 @@ def prepare_figure(
     # no topology. Watertightness is what matters: it decides whether vox.fill()
     # hits the interior instead of running outwards.
     t = _log(t_("pipeline.repair"))
-    if m.is_watertight and m.is_winding_consistent:
+    if m.is_volume:
         _log(t_("pipeline.repair_skipped", faces=i18n.format_int(len(m.faces))), t)
     else:
         mf = pymeshfix.MeshFix(m.vertices, m.faces)
@@ -813,7 +813,7 @@ def _recess_pair(
 
 def _wall_check(
     box: Manifold, cutters: list[Manifold], inlay: Manifold, config: Config,
-    apothem: float | None = None,
+    apothem: float | None = None, solids: list[Manifold] | None = None,
 ) -> dict:
     """Measures every wall of the finished inlay exactly, per figure.
 
@@ -834,13 +834,15 @@ def _wall_check(
 
     def flag(kind: str, figure: int | None, measured: float, target: float,
              other: int | None = None) -> None:
+        outer.append(float(measured))
         violations.append({"figure": figure, "kind": kind, "measured_mm": round(float(measured), 3),
                            "target_mm": float(target), "other": other})
 
     clips = [cutter ^ box for cutter in cutters]
     bounds: list[np.ndarray | None] = []
     for i, clip in enumerate(clips):
-        if clip.is_empty() or clip.volume() < _MIN_VOLUME_MM3:
+        body = (solids[i] ^ box) if solids is not None else clip
+        if body.is_empty() or body.volume() < _MIN_VOLUME_MM3:
             flag("no_cavity", i, 0.0, wall)
             bounds.append(None)
             continue
@@ -931,6 +933,8 @@ def build_inlay(
     """
     if isinstance(figures, trimesh.Trimesh):
         figures = [figures]
+    if not figures:
+        raise ValueError(t_("error.no_meshes"))
     # Validate up front: a value outside [-1, 1] would push a recess past the
     # figure's footprint, and failing after the CSG run would waste the build.
     for value in individual_recess_positions or []:
@@ -1061,8 +1065,10 @@ def build_inlay(
     t = _log(t_("pipeline.csg", label=csg_label))
     try:
         box_m = _to_manifold(box)
+        solids_m = [_to_manifold(s) for s in solids]
         cutters = [
-            Manifold.batch_boolean([_to_manifold(m) for m in [solids[i]] + recesses[i]], OpType.Add)
+            Manifold.batch_boolean([solids_m[i]] + [_to_manifold(r) for r in recesses[i]], OpType.Add)
+            if recesses[i] else solids_m[i]
             for i in range(n)
         ]
         inlay_m = box_m - Manifold.batch_boolean(cutters, OpType.Add)
@@ -1073,7 +1079,7 @@ def build_inlay(
         raise ValueError(t_("error.csg_empty"))
     _log(t_("pipeline.csg_result", faces=i18n.format_int(len(inlay.faces))), t)
 
-    wall_check = _wall_check(box_m, cutters, inlay_m, config, apothem)
+    wall_check = _wall_check(box_m, cutters, inlay_m, config, apothem, solids_m)
 
     # Box corner to the origin
     shift = np.array([centre[0] - box_w / 2.0, centre[1] - box_d / 2.0, -box_h])
@@ -1289,8 +1295,12 @@ def main(argv: list[str] | None = None) -> int:
     # The inlay is written after all the work is done - a typo in the output
     # directory used to cost the whole run.
     out_dir = os.path.dirname(os.path.abspath(args.output))
-    if os.path.isdir(args.output) or not os.path.isdir(out_dir) or not os.access(
-        args.output if os.path.exists(args.output) else out_dir, os.W_OK
+    if (
+        not args.output
+        or args.output.endswith((os.sep, os.altsep or os.sep))
+        or os.path.isdir(args.output)
+        or not os.path.isdir(out_dir)
+        or not os.access(args.output if os.path.exists(args.output) else out_dir, os.W_OK)
     ):
         parser.error(t_("cli.error.output_not_writable", path=args.output))
     # The rotations are the only numbers that do not pass through Config and

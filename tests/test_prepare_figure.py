@@ -59,9 +59,11 @@ class TestPrepareFigureErrors:
     @pytest.mark.parametrize(
         "triangles",
         [[[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]],
+         [[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]],
+          [[0, 0, 0], [10, 10, 0], [10, 0, 0]], [[0, 0, 0], [0, 10, 0], [10, 10, 0]]],
          np.ones((12, 3, 3)),
          [[[k, 0, 0], [k + 1, 0, 0], [k + 2, 0, 0]] for k in range(12)]],
-        ids=["flat-square", "collapsed-to-a-point", "collinear"],
+        ids=["flat-square", "double-sided-sheet", "collapsed-to-a-point", "collinear"],
     )
     def test_file_without_volume_names_the_file(self, tmp_path, fast_test_config, triangles):
         """Triangles, but nothing the repair could close into a solid: it
