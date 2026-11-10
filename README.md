@@ -72,6 +72,24 @@ python inlayer.py -i fig1.stl fig2.stl fig3.stl -o inlay.stl
 > **Note:** Python 3.14 is not supported yet — `manifold3d` and `pymeshfix`
 > have no wheels for it.
 
+### Dependency security baseline
+
+The runtime pins **Streamlit 1.66.1** and its otherwise transitive **Pillow
+13.0.0** dependency together. Pillow 13.0.0 fixes the OSV findings reported for
+12.3.0. Streamlit 1.62.0 through 1.66.0 require `pillow<13`, so do not combine
+the Pillow pin with an older Streamlit version or force-install either package.
+
+After changing dependencies, recreate the Python 3.13 environment and record
+the actual direct and transitive resolution rather than relying on the pins
+alone:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pip check
+python -m pip show streamlit pillow
+python -m pip freeze
+```
+
 ### 🌍 Language
 
 The interface speaks English and German. English is the default.

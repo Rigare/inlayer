@@ -9,9 +9,13 @@ options before the script starts — so they are pinned down here instead.
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import re
 import tomllib
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG = _REPO_ROOT / ".streamlit" / "config.toml"
@@ -129,3 +133,30 @@ def test_no_deprecated_use_container_width_api():
         if "use_container_width" in (_REPO_ROOT / name).read_text(encoding="utf-8")
     ]
     assert not hits, f"deprecated use_container_width in: {hits}"
+
+
+def test_pillow_security_pin_is_installed_and_accepted_by_streamlit():
+    """The pinned Streamlit release must accept the Pillow security fix."""
+    requirements = {
+        canonicalize_name(req.name): req
+        for line in (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+        for req in [Requirement(line)]
+    }
+    assert str(requirements["streamlit"].specifier) == "==1.66.1"
+    assert str(requirements["pillow"].specifier) == "==13.0.0"
+
+    installed = {
+        name: importlib.metadata.version(name)
+        for name in ("streamlit", "pillow")
+    }
+    assert all(installed[name] in requirements[name].specifier for name in installed)
+
+    streamlit_pillow_constraints = [
+        req.specifier
+        for requirement in importlib.metadata.requires("streamlit") or []
+        for req in [Requirement(requirement)]
+        if canonicalize_name(req.name) == "pillow"
+    ]
+    assert streamlit_pillow_constraints
+    assert all(installed["pillow"] in specifier for specifier in streamlit_pillow_constraints)

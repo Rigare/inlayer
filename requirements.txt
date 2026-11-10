@@ -36,5 +36,10 @@ pymeshfix==0.18.1
 fast_simplification==0.2.0
 
 # Web-App (nur fuer `streamlit run app.py`, nicht fuer die CLI noetig).
-streamlit==1.62.0
+# Streamlit 1.66.1 is the first release that accepts Pillow 13 (`pillow<14`).
+# Pin the transitive Pillow dependency explicitly: 13.0.0 fixes every OSV
+# finding reported for 12.3.0. Streamlit 1.62.0-1.66.0 require `pillow<13`
+# and must not be combined with this pin.
+streamlit==1.66.1
+pillow==13.0.0
 plotly==6.9.0
