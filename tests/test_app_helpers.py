@@ -212,6 +212,15 @@ class TestLoadPreviewMesh:
         out = app_helpers.load_preview_mesh(data, 1.0, "box.stl")
         assert len(out.faces) < len(sphere.faces)
 
+    @pytest.mark.parametrize("angle", [0.0, 30.0])
+    def test_flat_surface_names_the_file(self, angle):
+        """A sheet has area but no volume, in any orientation."""
+        sheet = trimesh.creation.box(extents=[10, 10, 0])
+        sheet.apply_transform(trimesh.transformations.rotation_matrix(angle, [1, 0, 1]))
+        data = cast(bytes, sheet.export(file_type="stl"))
+        with pytest.raises(ValueError, match="sheet.stl has no volume"):
+            app_helpers.load_preview_mesh(data, 1.0, "sheet.stl")
+
     @pytest.mark.parametrize(
         "data",
         [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2,

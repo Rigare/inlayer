@@ -84,11 +84,21 @@ class TestUploadRobustness:
         assert any("nan.stl" in w.value for w in at.warning)
         assert list(_trace_extents(at)) == ["a.stl"]
 
+    def test_flat_surface_is_skipped_with_a_warning(self):
+        """The preview must reject a sheet just like the generation step."""
+        sheet = binary_stl([
+            [[0, 0, 0], [10, 0, 0], [10, 10, 0]],
+            [[0, 0, 0], [10, 10, 0], [0, 10, 0]],
+        ])
+        at = _upload(_run("en"), [("a.stl", _stl([10, 10, 10])), ("sheet.stl", sheet)])
+        assert any("sheet.stl has no volume" in w.value for w in at.warning)
+        assert list(_trace_extents(at)) == ["a.stl"]
+
 
 class TestFailedRun:
     """A run that fails says which upload it failed on."""
 
-    # Previews fine, but is no solid: the pipeline refuses it
+    # Both the preview and the pipeline reject this flat sheet.
     SHEET = binary_stl([[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]])
 
     def test_error_names_the_upload_not_its_temp_file(self):
@@ -182,6 +192,32 @@ class TestRunWithoutUpload:
         assert at.session_state["result"]["file_names"] == ["figure.stl"]
         assert (tmp_path / "figure.stl").exists()  # only temporary upload files are cleaned up
 
+    def test_fallback_change_and_removal_mark_result_stale(self, tmp_path, monkeypatch):
+        """The actual fallback input belongs in the freshness snapshot."""
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / "figure.stl"
+        path.write_bytes(_stl([10, 10, 10]))
+        at = _run("en")
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception and not at.error
+        result = at.session_state["result"]
+        old_hash = app_helpers.file_hash(str(path))
+        assert result["params"]["files"] == [("figure.stl", old_hash)]
+        assert not _warned(at, "app.results.stale")
+
+        path.write_bytes(_stl([20, 10, 10]))
+        assert app_helpers.file_hash(str(path)) != old_hash
+        at.run()
+        assert _warned(at, "app.results.stale")
+        assert at.session_state["result"]["params"]["files"] == [("figure.stl", old_hash)]
+
+        path.unlink()
+        at.run()
+        assert not at.exception
+        assert _warned(at, "app.results.stale")
+        assert at.session_state["result"]["params"]["files"] == [("figure.stl", old_hash)]
+
 
 class TestCacheIdentity:
     """Process-wide caches are keyed by content, never by name and size."""
@@ -203,6 +239,67 @@ class TestCacheIdentity:
         assert not _warned(at, "app.results.stale")
         _upload(at, [("model.stl", _stl([20, 5, 5]))])
         assert _warned(at, "app.results.stale")
+
+
+class TestHiddenNumericValues:
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_values_survive_hiding_and_shape_changes_and_reach_config(self, lang, monkeypatch):
+        """Optional numeric controls must keep their values and use them on a run."""
+        at = _upload(_run(lang), [("cube.stl", _stl([10, 10, 10]))])
+        _widget(at, "checkbox", "finger_enabled").check().run()
+        _widget(at, "slider", "finger_radius").set_value(12.0).run()
+        _widget(at, "slider", "finger_z_offset").set_value(7.0).run()
+        _widget(at, "selectbox", "_w_finger_axis").set_value("y").run()
+
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        _widget(at, "number_input", "box_width").set_value(75.0).run()
+        _widget(at, "number_input", "box_depth").set_value(65.0).run()
+        _widget(at, "number_input", "box_height").set_value(30.0).run()
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        _widget(at, "number_input", "box_diameter").set_value(80.0).run()
+        _widget(at, "selectbox", "_w_box_shape").set_value("box").run()
+        assert _widget(at, "number_input", "box_width").value == 75.0
+        assert _widget(at, "number_input", "box_depth").value == 65.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        assert _widget(at, "number_input", "box_diameter").value == 80.0
+        _widget(at, "selectbox", "_w_box_shape").set_value("box").run()
+
+        _widget(at, "checkbox", "finger_enabled").uncheck().run()
+        _widget(at, "checkbox", "use_custom_box").uncheck().run()
+        assert at.session_state["_finger_radius_value"] == 12.0
+        assert at.session_state["_finger_z_offset_value"] == 7.0
+        assert at.session_state["_box_width_value"] == 75.0
+        assert at.session_state["_box_depth_value"] == 65.0
+        assert at.session_state["_box_height_value"] == 30.0
+        assert at.session_state["_box_diameter_value"] == 80.0
+        _widget(at, "checkbox", "finger_enabled").check().run()
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        assert _widget(at, "slider", "finger_radius").value == 12.0
+        assert _widget(at, "slider", "finger_z_offset").value == 7.0
+        assert _widget(at, "selectbox", "_w_finger_axis").value == "y"
+        assert _widget(at, "number_input", "box_width").value == 75.0
+        assert _widget(at, "number_input", "box_depth").value == 65.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+
+        captured = []
+
+        def capture_config(_figures, config, **_kwargs):
+            captured.append(config)
+            raise ValueError("config captured")
+
+        monkeypatch.setattr(inlayer, "build_inlay", capture_config)
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception
+        (config,) = captured
+        assert config.enable_finger_recesses is True
+        assert (config.finger_radius, config.finger_recess_axis, config.finger_recess_z_offset) == (12.0, "y", 7.0)
+        assert (config.box_shape, config.box_width, config.box_depth, config.box_height) == (
+            "box", 75.0, 65.0, 30.0,
+        )
+        assert config.box_diameter is None
 
 
 class TestRotationStepSurvivesHiding:

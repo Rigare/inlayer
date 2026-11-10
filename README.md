@@ -196,8 +196,8 @@ The web app is a full GUI with live preview:
 | Feature | Description |
 |---|---|
 | 🌍 **English / German** | Switch the interface language in the sidebar at any time |
-| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI |
-| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. After a run the viewer shows that result until you generate again; if settings or uploads have changed since, a warning says it is out of date |
+| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI; replacing or removing that file marks an earlier result as out of date |
+| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. Flat surfaces and other files without volume are skipped with a warning. After a run the viewer shows that result until you generate again; if settings or inputs have changed since, a warning says it is out of date |
 | 🧩 **Auto arrangement** | Multiple figures are placed without collisions (`compact` / `horizontal` / `vertical`) with an adjustable gap — it follows the wall thickness until you set it yourself |
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
 | 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box, in steps of 1, 5 or 10 mm |
