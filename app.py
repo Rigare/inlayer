@@ -227,11 +227,14 @@ st.session_state["_hash_by_file_id"] = content_hashes
 # The fallback file has no upload id. Hash it on every rerun so replacing or
 # removing it changes the staleness snapshot just like an uploaded input.
 fallback_path = inlayer.DEFAULT_INPUT
-fallback_hash = (
-    app_helpers.file_hash(fallback_path)
-    if not uploaded_files and os.path.isfile(fallback_path)
-    else None
-)
+fallback_hash = None
+fallback_read_error = None
+if not uploaded_files and os.path.isfile(fallback_path):
+    try:
+        fallback_hash = app_helpers.file_hash(fallback_path)
+    except OSError as error:
+        # An unavailable input marks old results stale; Generate reports why.
+        fallback_read_error = error
 input_snapshot = (
     [(uf.name, content_hashes[uf.file_id]) for uf in uploaded_files]
     if uploaded_files
@@ -301,7 +304,11 @@ def _persistent_number(widget, label: str, key: str, default: float, **kwargs):
     st.session_state.setdefault(stored_key, default)
     if key not in st.session_state:
         st.session_state[key] = st.session_state[stored_key]
-    value = widget(label, key=key, **kwargs)
+    value = widget(
+        label, key=key,
+        on_change=lambda: st.session_state.update({stored_key: st.session_state[key]}),
+        **kwargs,
+    )
     st.session_state[stored_key] = value
     return value
 
@@ -743,6 +750,8 @@ if run_btn:
                 input_paths.append(tmp_paths[-1])
                 file_names.append(_labels[uf.file_id])
                 file_hashes.append(content_hashes[uf.file_id])
+        elif fallback_read_error is not None:
+            raise fallback_read_error
         elif fallback_hash is not None:
             input_paths = [fallback_path]
             file_names = [fallback_path]

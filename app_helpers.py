@@ -29,7 +29,6 @@ import hashlib
 import io
 
 
-import numpy as np
 import trimesh
 
 import inlayer
@@ -170,17 +169,13 @@ def preview_copy(mesh: trimesh.Trimesh, face_count: int) -> trimesh.Trimesh:
 def load_preview_mesh(data: bytes, scale: float, name: str) -> trimesh.Trimesh:
     """Loads an uploaded STL, decimated for the instant preview.
 
-    Raises ValueError naming the file if it holds no triangles or no volume.
-    Flat surfaces therefore produce a preview warning instead of a mesh that
-    the generation step would reject later.
+    Rejects unreadable files and meshes without usable triangles or area,
+    naming the upload. Flat surfaces can appear here; only generation repairs
+    the mesh and checks whether it can form a solid.
     """
     mesh = inlayer.load_mesh(io.BytesIO(data), name, file_type="stl")
     if scale != 1.0:
         mesh.apply_scale(scale)
-    with np.errstate(invalid="ignore"):
-        has_volume = abs(mesh.volume) > 0
-    if not (mesh.area > 0) or not has_volume:
-        raise ValueError(t("error.not_solid", name=name))
     mesh = decimate_mesh(mesh, PREVIEW_FACE_BUDGET)
     if not (mesh.area > 0):
         raise ValueError(t("error.not_solid", name=name))
