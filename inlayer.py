@@ -188,7 +188,7 @@ CUT_OVERSHOOT_MM: Final[float] = 1.0
 
 # The wall check measures the real meshes (float32 inside manifold3d), not a
 # voxel grid, so its tolerance only has to absorb rounding and the cylinder's
-# chord error (< 0.02 mm at ~1 mm segments).
+# chord error (< 0.02 mm at ~1 mm segments), capped at half each target.
 WALL_TOLERANCE_MM: Final[float] = 0.05
 
 # Below this a clipped cutter counts as empty (boolean slivers, not pockets)
@@ -819,16 +819,31 @@ def _wall_check(
 
     Each figure's cutter (cavity plus its recesses) is clipped to the box;
     for axis-parallel walls the thinnest point of a pocket is exactly its
-    bounds' distance to the box face, for the cylinder the farthest vertex
-    (a convex function peaks at a vertex). Walls between two pockets come
-    from manifold3d's min_gap. Findings name the figure (index) they belong
+    bounds' distance to the box face. For cylinders, a radial lower bound
+    suffices unless it fails; then the prism's actual side planes decide.
+    Walls between two pockets come from manifold3d's min_gap.
+    Findings name the figure (index) they belong
     to - the old voxel check overestimated walls by up to a pitch, ignored
     the walls between cavities and passed an inlay without any cavity.
     """
     wall, gap = config.wall_thickness, config.effective_figure_gap
-    tol = WALL_TOLERANCE_MM
+    # Rounding must never erase a positive wall or gap target.
+    min_wall = wall - min(WALL_TOLERANCE_MM, wall / 2)
+    min_gap = gap - min(WALL_TOLERANCE_MM, gap / 2)
     bx = np.array(box.bounding_box())  # x0, y0, z0, x1, y1, z1
     centre = (bx[:2] + bx[3:5]) / 2
+    side_planes = []
+    if apothem is not None:
+        mesh = box.to_mesh()
+        vertices = np.asarray(mesh.vert_properties[:, :3], dtype=float)
+        centre = vertices[:, :2].mean(axis=0)
+        triangles = vertices[mesh.tri_verts]
+        normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        vertical = normals[:, 2] == 0
+        side_normals = normals[vertical, :2]
+        side_normals /= np.linalg.norm(side_normals, axis=1, keepdims=True)
+        side_distances = np.einsum("ij,ij->i", side_normals, triangles[vertical, 0, :2])
+        side_planes = list(zip(side_normals, side_distances))
     violations: list[dict] = []
     outer: list[float] = []
 
@@ -851,13 +866,17 @@ def _wall_check(
         if apothem is not None:
             xy = clip.to_mesh().vert_properties[:, :2]
             side = apothem - float(np.linalg.norm(xy - centre, axis=1).max())
+            if side < min_wall:
+                # Near polygon corners the radial bound can be negative for an intact wall.
+                side = min(float(distance - (xy @ normal).max())
+                           for normal, distance in side_planes)
         else:
             side = float(min(bb[0] - bx[0], bx[3] - bb[3], bb[1] - bx[1], bx[4] - bb[4]))
         floor = float(bb[2] - bx[2])
         outer += [side, floor]
-        if side < wall - tol:
+        if side < min_wall:
             flag("side", i, side, wall)
-        if floor < wall - tol:
+        if floor < min_wall:
             flag("floor", i, floor, wall)
 
     for i, a in enumerate(bounds):
@@ -869,7 +888,7 @@ def _wall_check(
                 flag("merged", i, 0.0, gap, j)
             else:
                 measured = clips[i].min_gap(clips[j], gap)
-                if measured < gap - tol:
+                if measured < min_gap:
                     flag("inner", i, measured, gap, j)
 
     # An enclosed void is a separate shell with negative volume
