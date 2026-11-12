@@ -8,6 +8,8 @@ no figure for a recess breaking through.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import trimesh
 from manifold3d import Manifold
@@ -137,6 +139,91 @@ class TestFindings:
         assert inlay.metadata["violating_indices"] == [1]
 
 
+class TestSmallTargets:
+    @pytest.mark.parametrize("kind,offset", [
+        ("side", (0.1, 0.0, 0.0)),
+        ("floor", (0.0, 0.0, -0.1)),
+    ])
+    def test_outer_breakthrough_is_a_finding(self, dilated_cube, tmp_path, kind, offset):
+        """A target below the rounding tolerance must still reject an open wall."""
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, wall_thickness=0.02)
+        inlay, *_ = _build([dilated_cube], cfg, individual_offsets=[offset])
+        path = tmp_path / "inlay.stl"
+        inlay.export(path)
+        exported = trimesh.load_mesh(path)
+        assert gp.outer_walls(exported, *exported.extents)[kind] <= 0.0011
+        assert (kind, 0) in _kinds(inlay)
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is False
+        assert inlay.metadata["wall_check"]["min_wall_mm"] == pytest.approx(0.0, abs=1e-5)
+
+    @pytest.mark.parametrize("flag,value,kind", [
+        ("--offset-x", "0.1", "side"),
+        ("--offset-z", "-0.1", "floor"),
+    ])
+    def test_cli_returns_three_for_exported_breakthrough(
+        self, cube_stl_path, tmp_path, flag, value, kind,
+    ):
+        path = tmp_path / "inlay.stl"
+        code = inlayer.main([
+            "-i", cube_stl_path, "-o", str(path), "-w", "0.02", "-vp", "1",
+            "--decimate-faces", "1000", flag, value,
+        ])
+        exported = trimesh.load_mesh(path)
+        assert gp.outer_walls(exported, *exported.extents)[kind] <= 0.0011
+        assert code == inlayer.EXIT_CHECK_FAILED == 3
+
+    def test_touching_pockets_are_a_finding(self, dilated_cube, tmp_path):
+        """Face contact merges the exported cavities without positive overlap volume."""
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000,
+                     figure_gap=0.04, layout_style="horizontal")
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
+                           individual_offsets=[(0.0, 0.0, 0.0), (-0.04, 0.0, 0.0)])
+        path = tmp_path / "inlay.stl"
+        inlay.export(path)
+        exported = trimesh.load_mesh(path)
+        assert len(gp.cavities(exported, *exported.extents)) == 1
+        check = inlay.metadata["wall_check"]
+        assert check["passes_min_wall"] is False
+        (finding,) = check["violations"]
+        assert finding["kind"] in {"inner", "merged"}
+        assert {finding["figure"], finding["other"]} == {0, 1}
+        assert finding["measured_mm"] == pytest.approx(0.0, abs=1e-5)
+        assert check["min_wall_mm"] == pytest.approx(0.0, abs=1e-5)
+
+    @pytest.mark.parametrize("offset,measured,passes", [(-0.03, 0.01, False), (-0.01, 0.03, True)])
+    def test_small_gap_tolerance_preserves_half_the_target(
+        self, dilated_cube, tmp_path, offset, measured, passes,
+    ):
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000,
+                     figure_gap=0.04, layout_style="horizontal")
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
+                           individual_offsets=[(0.0, 0.0, 0.0), (offset, 0.0, 0.0)])
+        path = tmp_path / "inlay.stl"
+        inlay.export(path)
+        exported = trimesh.load_mesh(path)
+        assert len(gp.cavities(exported, *exported.extents)) == 2
+        assert gp.inner_gap(exported, *exported.extents) == pytest.approx(measured, abs=1e-4)
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is passes
+        if not passes:
+            assert _kinds(inlay) == [("inner", 0)]
+
+    @pytest.mark.parametrize("wall,offset,side", [(0.02, 0.0, 0.02), (2.0, 0.04, 1.96)])
+    def test_positive_walls_and_gap_still_pass(self, dilated_cube, tmp_path, wall, offset, side):
+        """Keep valid tiny targets and the normal rounding allowance usable."""
+        cfg = Config(voxel_pitch=1.0, decimate_faces=1000, wall_thickness=wall,
+                     figure_gap=0.04, layout_style="horizontal")
+        inlay, *_ = _build([dilated_cube, dilated_cube.copy()], cfg,
+                           individual_offsets=[(offset, 0.0, 0.0)] * 2)
+        path = tmp_path / "inlay.stl"
+        inlay.export(path)
+        exported = trimesh.load_mesh(path)
+        assert len(gp.cavities(exported, *exported.extents)) == 2
+        assert gp.inner_gap(exported, *exported.extents) == pytest.approx(0.04, abs=1e-4)
+        assert gp.outer_walls(exported, *exported.extents)["side"] == pytest.approx(side, abs=1e-4)
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is True
+        assert _kinds(inlay) == []
+
+
 class TestCylinder:
     def _cfg(self):
         return Config(voxel_pitch=1.0, decimate_faces=1000, box_shape="cylinder")
@@ -144,6 +231,30 @@ class TestCylinder:
     def test_centred_figure_passes(self, dilated_cube):
         inlay, *_ = _build([dilated_cube], self._cfg())
         assert inlay.metadata["wall_check"]["passes_min_wall"] is True
+
+    @pytest.mark.parametrize("sections", [64, 65])
+    @pytest.mark.parametrize("margin", [0.01, 0.0, -0.01])
+    def test_tiny_walls_at_prism_vertex(self, tmp_path, sections, margin):
+        """Distinguish intact walls from contact and breaches at even and odd rims."""
+        box = Manifold.cylinder(10.0, 10.0, circular_segments=sections).translate((0.0, 0.0, -10.0))
+        cutter = Manifold.cube((1.0, 0.01, 5.0)).translate((9.0 - margin, -0.005, -2.0))
+        inlay = box - cutter
+        cfg = Config(box_shape="cylinder", wall_thickness=0.005)
+        check = inlayer._wall_check(box, [cutter], inlay, cfg,
+                                   apothem=10.0 * math.cos(math.pi / sections))
+        path = tmp_path / "inlay.stl"
+        inlayer._to_trimesh(inlay).export(path)
+        exported = trimesh.load_mesh(path)
+        hits = gp.to_manifold(exported).ray_cast((12.0, 0.0, -1.0), (-12.0, 0.0, -1.0))
+        if margin > 0:
+            assert len(hits) == 4
+            assert hits[0].position[0] - hits[1].position[0] == pytest.approx(margin, abs=1e-5)
+            assert check["passes_min_wall"] is True
+            assert check["violations"] == []
+        else:
+            assert len(hits) == 2
+            assert check["passes_min_wall"] is False
+            assert [(v["kind"], v["figure"]) for v in check["violations"]] == [("side", 0)]
 
     def test_radial_wall_is_measured(self, dilated_cube):
         """An off-centre figure cuts into the mantle: the check reports the
