@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import io
 import subprocess
 import sys
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -81,6 +83,99 @@ def _project(tmp_path, with_paths=True):
         project_path=recipe_path,
     )
     return recipe, (first, second, paths)
+
+
+def _observed_cli(args, cwd, report_path):
+    """Run the real CLI in a fresh process, recording its pipeline boundary."""
+    script = """
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
+report_path = Path(sys.argv.pop(1))
+import inlayer
+report = {}
+real_build = inlayer.build_inlay
+real_stats = inlayer.wall_thickness_stats_3d
+def build(figures, config, **kwargs):
+    report['config'] = asdict(config)
+    report['offsets'] = kwargs.get('individual_offsets')
+    if report['offsets'] is None:
+        report['offsets'] = [(config.offset_x, config.offset_y, config.offset_z)] * len(figures)
+    report['grips'] = kwargs.get('individual_recess_positions')
+    report['figure_bounds'] = [mesh.bounds.tolist() for mesh in figures]
+    return real_build(figures, config, **kwargs)
+def stats(mesh):
+    report['stats'] = real_stats(mesh)
+    return report['stats']
+inlayer.build_inlay = build
+inlayer.wall_thickness_stats_3d = stats
+code = inlayer.main(sys.argv[1:])
+report_path.write_text(json.dumps(report), encoding='utf-8')
+raise SystemExit(code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(Path(inlayer.__file__).parent), str(report_path),
+         *map(str, args)],
+        cwd=cwd, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode in (0, inlayer.EXIT_CHECK_FAILED), result.stdout + result.stderr
+    return result, json.loads(report_path.read_text(encoding="utf-8"))
+
+
+def _assert_project_values(actual, expected):
+    """The Web omits local paths, but must preserve every recipe value."""
+    assert actual.config == expected.config
+    assert actual.figures == tuple(
+        replace(figure, source=replace(figure.source, path=None)) for figure in expected.figures
+    )
+
+
+def _assert_same_finished_mesh(actual, expected, shape):
+    """Measure exported meshes independently of pipeline metadata."""
+    from tests import geometry_probe as probe
+
+    np.testing.assert_allclose(actual.bounds, expected.bounds, atol=2e-3)
+    assert actual.volume == pytest.approx(expected.volume, rel=1e-5, abs=2e-3)
+    assert probe.shell_count(actual) == probe.shell_count(expected) == 1
+    dimensions = expected.extents
+    if shape == "box":
+        assert probe.outer_walls(actual, *dimensions) == pytest.approx(
+            probe.outer_walls(expected, *dimensions), abs=2e-3,
+        )
+        assert probe.inner_gap(actual, *dimensions) == pytest.approx(
+            probe.inner_gap(expected, *dimensions), abs=2e-3,
+        )
+        pockets = probe.cavities(actual, *dimensions)
+        reference_pockets = probe.cavities(expected, *dimensions)
+    else:
+        assert probe.cylinder_side_wall(actual) == pytest.approx(
+            probe.cylinder_side_wall(expected), abs=2e-3,
+        )
+        # The finished mesh's convex hull closes the pockets independently of
+        # the pipeline's cylinder dimensions or polygon construction.
+        def cylinder_pockets(mesh):
+            removed = probe.to_manifold(mesh.convex_hull) - probe.to_manifold(mesh)
+            return [p for p in removed.decompose() if p.volume() > 1e-3]
+
+        pockets = cylinder_pockets(actual)
+        reference_pockets = cylinder_pockets(expected)
+        assert pockets[0].min_gap(pockets[1], 5.0) == pytest.approx(
+            reference_pockets[0].min_gap(reference_pockets[1], 5.0), abs=2e-3,
+        )
+    assert len(pockets) == len(reference_pockets) == 2
+    np.testing.assert_allclose(
+        sorted(p.volume() for p in pockets), sorted(p.volume() for p in reference_pockets),
+        atol=2e-3,
+    )
+    np.testing.assert_allclose(
+        sorted(tuple(p.bounding_box()) for p in pockets),
+        sorted(tuple(p.bounding_box()) for p in reference_pockets), atol=2e-3,
+    )
+    actual_solid, expected_solid = probe.to_manifold(actual), probe.to_manifold(expected)
+    assert (actual_solid - expected_solid).volume() < 2e-3
+    assert (expected_solid - actual_solid).volume() < 2e-3
 
 
 class TestRoundTrip:
@@ -318,6 +413,142 @@ class TestCLIProjects:
         mesh = trimesh.load(str(path), force="mesh")
         assert isinstance(mesh, trimesh.Trimesh)
         return np.concatenate([mesh.extents, [mesh.volume], mesh.center_mass])
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("case,changes", [
+        pytest.param("cli-height", {}, id="cli-flags-partial-box-height"),
+        pytest.param("recipe", {"box_width": 60.0}, id="partial-box-width"),
+        pytest.param("recipe", {"box_depth": 35.0}, id="partial-box-depth"),
+        pytest.param("recipe", {"box_shape": "cylinder", "box_height": 30.0},
+                     id="partial-cylinder-height"),
+        pytest.param("recipe", {"box_shape": "cylinder", "box_diameter": 60.0},
+                     id="partial-cylinder-diameter"),
+        pytest.param("recipe", {
+            "clearance": 0.25, "decimate_faces": 1000, "wall_thickness": 2.25,
+            "depth_fraction": 0.725, "voxel_pitch": 0.75, "stl_unit_to_mm": 1.025,
+            "finger_radius": 5.25, "finger_recess_z_offset": 0.25,
+        }, id="fractional-values"),
+        pytest.param("recipe", {
+            "clearance": 2.25, "wall_thickness": 6.0, "depth_fraction": 0.25,
+            "voxel_pitch": 1.25, "decimate_faces": 1000, "finger_radius": 4.25,
+            "finger_recess_z_offset": 30.5, "figure_gap": 40.5,
+            "box_width": 301.0, "box_height": 50.0, "offset_x": 100.5,
+        }, id="outside-widget-ranges"),
+        pytest.param("recipe", {"enable_finger_recesses": False},
+                     id="disabled-recess-values"),
+    ])
+    def test_cli_web_cli_preserves_and_applies_every_recipe_value(
+        self, tmp_path, monkeypatch, case, changes,
+    ):
+        """CLI exports survive fresh Web sessions and another CLI process unchanged."""
+        from tests.test_app_render import _open_project, _run, _widget
+
+        first, second, paths, sources = _sources(tmp_path)
+        initial_json = tmp_path / "initial.json"
+        initial_stl = tmp_path / "initial.stl"
+        if case == "cli-height":
+            # Reproduce the reported valid CLI invocation with automatic width/depth.
+            original, original_report = _observed_cli([
+                "-i", *paths, "--box-height", "30", "--voxel-pitch", "1",
+                "--decimate-faces", "5000", "--save-project", initial_json,
+                "-o", initial_stl,
+            ], tmp_path, tmp_path / "initial-report.json")
+        else:
+            config = replace(
+                _config(), figure_gap=None, offset_x=0.5, offset_z=0.25,
+                finger_recess_position=0.37,
+            )
+            config = replace(config, **changes)
+            recipe = new_project(
+                config, sources,
+                rotations=[(-12.5, 0.0, 372.5), (0.0, 720.0, 12.5)],
+                offsets=[(0.5, 0.0, 0.25), (-0.5, 0.5, 0.0)],
+                recess_positions=[0.12, -0.12],
+                figure_ids=["figure-one", "figure-two"], project_path=initial_json,
+            )
+            save_project(recipe, initial_json)
+            original, original_report = _observed_cli([
+                "--project", initial_json, "-i", *paths, "-o", initial_stl,
+                "--save-project", tmp_path / "cli-export.json",
+            ], tmp_path, tmp_path / "initial-report.json")
+            initial_json = tmp_path / "cli-export.json"
+        expected = load_project(initial_json)
+        assert original_report["config"] == asdict(expected.config)
+        assert expected.config.figure_gap is None or changes.get("figure_gap") == 40.5
+        if case == "cli-height":
+            assert (expected.config.box_width, expected.config.box_depth) == (None, None)
+            assert expected.config.box_height == 30.0
+
+        observed = []
+        real_build = inlayer.build_inlay
+
+        def capture_build(figures, config, **kwargs):
+            observed.append((config, kwargs, [mesh.bounds.copy() for mesh in figures]))
+            return real_build(figures, config, **kwargs)
+
+        monkeypatch.setattr(inlayer, "build_inlay", capture_build)
+        files = [("model.stl", second), ("model.stl", first)]
+        web = _open_project(_run("en"), files, initial_json.read_text(encoding="utf-8"))
+        assert not web.error, [error.value for error in web.error]
+        _assert_project_values(loads_project(web.session_state["_project_export"]), expected)
+        # A language switch must not turn widget projections into recipe edits.
+        _widget(web, "selectbox", "ui_lang").set_value("de").run()
+        assert not web.exception and not web.error
+        _assert_project_values(loads_project(web.session_state["_project_export"]), expected)
+        if changes.get("clearance") == 0.25:
+            uploads_by_project = {
+                project_id: upload_id
+                for upload_id, project_id in web.session_state["_project_id_by_file_id"].items()
+            }
+            for key in ("selected_fig", "selected_rot_fig", "selected_recess_fig"):
+                for figure in reversed(expected.figures):
+                    _widget(web, "selectbox", key).set_value(uploads_by_project[figure.id]).run()
+                    assert not web.exception and not web.error
+                    _assert_project_values(
+                        loads_project(web.session_state["_project_export"]), expected,
+                    )
+        web.button[0].click().run()
+        assert not web.exception and not web.error
+        assert len(observed) == 1
+        passed_config, kwargs, figure_bounds = observed[0]
+        assert passed_config == expected.config
+        assert kwargs["individual_offsets"] == effective_offsets(expected)
+        if expected.config.enable_finger_recesses:
+            assert kwargs["individual_recess_positions"] == [
+                figure.finger_recess_position for figure in expected.figures
+            ]
+        np.testing.assert_allclose(
+            figure_bounds, original_report["figure_bounds"], atol=2e-3,
+        )
+        result = web.session_state["result"]
+        assert result["stats_3d"] == original_report["stats"]
+        actual = loads_project(web.session_state["_project_export"])
+        _assert_project_values(actual, expected)
+        assert [figure.source.sha256 for figure in actual.figures] == [
+            project_module.bytes_hash(first), project_module.bytes_hash(second),
+        ]
+        assert all(len(figure.source.sha256) == 64 for figure in actual.figures)
+
+        web_json = tmp_path / "web.json"
+        web_json.write_text(web.session_state["_project_export"], encoding="utf-8")
+        elsewhere = tmp_path / "other-cwd"
+        elsewhere.mkdir()
+        reopened_stl = tmp_path / "reopened.stl"
+        reopened, reopened_report = _observed_cli([
+            "--project", web_json, "-i", *reversed(paths), "-o", reopened_stl,
+            "--save-project", tmp_path / "reopened.json",
+        ], elsewhere, tmp_path / "reopened-report.json")
+        assert reopened.returncode == original.returncode
+        assert reopened_report == original_report
+        reopened_recipe = load_project(tmp_path / "reopened.json")
+        assert reopened_recipe == expected
+        web_mesh = trimesh.load(io.BytesIO(result["stl_bytes"]), file_type="stl", force="mesh")
+        original_mesh = trimesh.load(str(initial_stl), force="mesh")
+        reopened_mesh = trimesh.load(str(reopened_stl), force="mesh")
+        assert all(isinstance(mesh, trimesh.Trimesh)
+                   for mesh in (web_mesh, original_mesh, reopened_mesh))
+        _assert_same_finished_mesh(web_mesh, original_mesh, expected.config.box_shape)
+        _assert_same_finished_mesh(reopened_mesh, original_mesh, expected.config.box_shape)
 
     def test_restart_reopens_same_named_sources_and_individual_settings(
         self, tmp_path, capsys, monkeypatch

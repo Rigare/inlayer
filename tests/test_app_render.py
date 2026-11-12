@@ -1,11 +1,8 @@
-"""Rendert die Streamlit-App in beiden Sprachen.
+"""Render the Streamlit app in both languages.
 
-`app.py` liess sich lange nicht testen, weil es `st.set_page_config()` aufruft
-und die Sidebar auf Modul-Ebene baut — deshalb liegt die pure Logik in
-`app_helpers.py`. Streamlits `AppTest` fuehrt das Skript aber in einer echten
-Laufzeitumgebung aus und macht damit genau das pruefbar, was dort nicht
-hinauswandern kann: dass die Oberflaeche ueberhaupt fehlerfrei durchlaeuft und
-dass die Sprachumschaltung die Beschriftungen erreicht.
+The pure logic lives in `app_helpers.py` because importing `app.py` configures
+the page and builds the sidebar. AppTest runs the actual script in a Streamlit
+runtime to check rendering, interaction, and translated labels.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ import ast
 import base64
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -856,6 +854,81 @@ class TestProjectRecipes:
             restarted.session_state["_project_export"]
         ).config.figure_gap is None
 
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_single_source_preserves_hidden_and_inactive_values_when_editing(self, lang):
+        """One visible edit must retain imported values that have no visible control."""
+        files = [self._files()[0]]
+        config = inlayer.Config(
+            clearance=0.25, voxel_pitch=1.0, decimate_faces=1000,
+            box_height=30.0, box_diameter=77.25, figure_gap=7.25,
+            layout_style="vertical", offset_x=0.5, offset_z=0.25,
+            finger_recess_position=0.37, enable_finger_recesses=False,
+            finger_radius=4.25, finger_recess_z_offset=0.25,
+        )
+        recipe = inlayer_project.new_project(
+            config,
+            [inlayer_project.SourceIdentity("model.stl", inlayer_project.bytes_hash(files[0][1]))],
+            rotations=[(-12.5, 372.5, 720.0)], offsets=[(0.5, 0.0, 0.25)],
+            recess_positions=[0.12], figure_ids=["persistent-figure"],
+        )
+        at = _open_project(_run(lang), files, inlayer_project.dumps_project(recipe))
+        assert not at.error
+        assert inlayer_project.loads_project(at.session_state["_project_export"]) == recipe
+        _widget(at, "selectbox", "ui_lang").set_value("de" if lang == "en" else "en").run()
+        assert not at.exception and not at.error
+        assert inlayer_project.loads_project(at.session_state["_project_export"]) == recipe
+        _widget(at, "slider", "clearance").set_value(0.6).run()
+        assert not at.exception and not at.error
+        assert inlayer_project.loads_project(at.session_state["_project_export"]) == replace(
+            recipe, config=replace(config, clearance=0.6),
+        )
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    @pytest.mark.parametrize("action", ["hide_radius", "switch_shape", "cancel_offset", "toggle_axes"])
+    def test_imported_values_survive_hiding_controls_and_toggling_features(self, lang, action):
+        """Hidden widgets must not undo edits or discard untouched recipe values."""
+        files = [self._files()[0]]
+        config = inlayer.Config(
+            clearance=0.25, voxel_pitch=1.0, decimate_faces=1000,
+            box_width=50.0, box_height=30.0, offset_x=0.5,
+            enable_finger_recesses=True, finger_radius=5.0,
+        )
+        recipe = inlayer_project.new_project(
+            config,
+            [inlayer_project.SourceIdentity("model.stl", inlayer_project.bytes_hash(files[0][1]))],
+            rotations=[(0.0, 0.0, 12.5)],
+            offsets=[(-0.5 if action == "cancel_offset" else 0.5, 0.0, 0.0)],
+            recess_positions=[0.12], figure_ids=["persistent-figure"],
+        )
+        at = _open_project(_run(lang), files, inlayer_project.dumps_project(recipe))
+        assert not at.error
+        expected = recipe
+        if action == "hide_radius":
+            _widget(at, "slider", "finger_radius").set_value(6.5).run()
+            _widget(at, "checkbox", "finger_enabled").uncheck().run()
+            expected = replace(recipe, config=replace(config, finger_radius=6.5,
+                                                      enable_finger_recesses=False))
+        elif action == "switch_shape":
+            _widget(at, "number_input", "box_width").set_value(60.0).run()
+            _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+            expected = replace(recipe, config=replace(config, box_width=60.0, box_shape="cylinder"))
+        elif action == "toggle_axes":
+            _widget(at, "checkbox", "manual_offsets").uncheck().run()
+            _widget(at, "checkbox", "manual_rotations").uncheck().run()
+            disabled = inlayer_project.loads_project(at.session_state["_project_export"])
+            assert disabled == replace(
+                recipe, config=replace(config, offset_x=0.0),
+                figures=(replace(recipe.figures[0], offset=(0.0, 0.0, 0.0),
+                                 rotation=(0.0, 0.0, 0.0)),),
+            )
+            _widget(at, "checkbox", "manual_offsets").check().run()
+            _widget(at, "checkbox", "manual_rotations").check().run()
+        assert not at.exception and not at.error
+        assert inlayer_project.loads_project(at.session_state["_project_export"]) == expected
+        _widget(at, "selectbox", "ui_lang").set_value("de" if lang == "en" else "en").run()
+        assert not at.exception and not at.error
+        assert inlayer_project.loads_project(at.session_state["_project_export"]) == expected
+
     def test_fresh_web_session_reproduces_geometry_and_wall_findings(self):
         files = self._files()
         original = _open_project(_run("en"), files, _project_recipe(files))
@@ -890,7 +963,7 @@ class TestProjectRecipes:
         np.testing.assert_allclose(reopened_mesh.bounds, original_mesh.bounds, atol=2e-3)
 
     @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
-    @pytest.mark.parametrize("case", ["missing", "changed", "version", "web_value", "partial_box"])
+    @pytest.mark.parametrize("case", ["missing", "changed", "version", "invalid_value"])
     def test_invalid_project_or_source_stops_before_the_pipeline(self, lang, case, monkeypatch):
         files = self._files()
         recipe = _project_recipe(files)
@@ -912,16 +985,13 @@ class TestProjectRecipes:
             raw["version"] = 99
             recipe = json.dumps(raw)
             expected = i18n.TRANSLATIONS["project.unsupported_version"][lang].format(version=99)
-        elif case == "web_value":
-            raw = json.loads(recipe)
-            raw["config"]["clearance"] = 0.25
-            recipe = json.dumps(raw)
-            expected = i18n.TRANSLATIONS["project.web_value"][lang].format(field="clearance")
         else:
             raw = json.loads(recipe)
-            raw["config"]["box_height"] = 30.0
+            raw["config"]["clearance"] = -0.25
             recipe = json.dumps(raw)
-            expected = i18n.TRANSLATIONS["project.web_value"][lang].format(field="box_width")
+            expected = i18n.TRANSLATIONS["config.must_be_non_negative"][lang].format(
+                name="clearance", value=-0.25,
+            )
 
         def pipeline_must_not_start(*_args, **_kwargs):
             raise AssertionError("the pipeline must not start")

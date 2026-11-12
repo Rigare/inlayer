@@ -298,11 +298,14 @@ their content differs.
 **A recipe is not an archive:** it contains no STL bytes and is not a ZIP file.
 To reopen a project in the web app, upload its JSON and exactly one original
 STL per project figure. The app checks every hash immediately; missing,
-changed or additional sources and incompatible settings are reported in the
+changed or additional sources and invalid recipes are reported in the
 sidebar, and *Generate* cannot start until the inputs match. Sources are then
 put into project order by content hash, never by name. The same recipe can be
-exported again with the same stable ids. Disabled per-figure features are
-saved with their effective zero values.
+exported again with the same stable ids. Imported settings are retained exactly,
+including values outside the ordinary controls and disabled finger-recess settings.
+The controls show an editable approximation where necessary; only an explicit
+edit replaces the corresponding imported value. Disabling manual offsets or
+rotations exports their effective zero values, so reopening matches the web run.
 
 For the CLI, relative source paths are resolved from the **recipe's directory**,
 not the process's working directory. Web exports deliberately have no local
@@ -315,20 +318,19 @@ The `--save-project` destination must differ from every STL input and the STL
 output; overwriting the opened JSON recipe itself is allowed.
 
 A figure's `offset` is its individual addition to `config.offset_x/y/z` and is
-applied exactly once. The web UI has no separate global-offset controls, so
-its exports carry the effective per-figure offsets shown there and zero global
-offsets.
+applied exactly once. Imported global and individual offsets remain separate
+in exported recipes; the web controls edit each figure's individual addition.
 
 Version 1 is strict: malformed JSON, missing or unknown fields, invalid hashes
 and unsupported versions fail with a readable error instead of a best-guess
-import. The web importer also rejects values outside its existing widget
-ranges or between their steps (for example fractional-degree rotations or grip
-positions not divisible by 5 %) rather than silently rounding them. Such
-projects remain usable in the CLI when their `Config` is valid. A custom box
-must specify all dimensions for its shape in the web app; partially automatic
-dimensions remain a CLI feature. An automatic figure gap keeps following the
-wall thickness after export and reopening. Reopening a
-project preserves the computed geometry and wall findings within normal
+import. Web and CLI accept the same valid recipe values, including fractional
+rotations, offsets and grip positions and values beyond the usual web controls.
+Box and cylinder dimensions can be independently fixed or automatic (`null`):
+for example, a fixed height with automatic width and depth stays that way in
+the web app and its exports. An automatic figure gap (`null`) keeps following
+the wall thickness after export and reopening. Existing source checks, upload
+limits and voxel-grid resource checks still apply. Reopening a project preserves
+the computed geometry and wall findings within normal
 floating-point tolerances; STL byte-for-byte equality is not required.
 
 ---

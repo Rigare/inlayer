@@ -159,6 +159,10 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Projekt geladen: {n} Figuren und ihre Quellen wurden per SHA-256 geprüft.",
         "en": "Project loaded: {n} figures and their sources were verified by SHA-256.",
     },
+    "app.project.controls": {
+        "de": "Importierte Werte bleiben für Berechnung und Export exakt erhalten, auch automatische Maße. Regler können einen abweichenden bearbeitbaren Wert anzeigen; erst eine bewusste Änderung ersetzt den zugehörigen Projektwert.",
+        "en": "Imported values stay exact for generation and export, including automatic dimensions. Controls may show a different editable value; only an explicit edit replaces the corresponding project value.",
+    },
     "app.project.heading": {
         "de": "### 💾 Projekt",
         "en": "### 💾 Project",
@@ -168,8 +172,8 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "en": "Download project as JSON",
     },
     "app.project.download.help": {
-        "de": "Speichert Formatversion 1 mit Konfiguration, vollständigen SHA-256-Quellhashes, stabilen Figuren-IDs sowie individuellen Rotationen, Offsets und Griffpositionen. Deaktivierte individuelle Funktionen werden mit ihren wirksamen Nullwerten gespeichert. STLs werden nicht eingebettet.",
-        "en": "Saves format version 1 with configuration, full SHA-256 source hashes, stable figure ids and individual rotations, offsets and grip positions. Disabled individual features are saved with their effective zero values. STLs are not embedded.",
+        "de": "Speichert Formatversion 1 mit Konfiguration, vollständigen SHA-256-Quellhashes, stabilen Figuren-IDs sowie individuellen Rotationen, Offsets und Griffpositionen. Importierte Griffparameter bleiben auch bei deaktivierten Fingermulden erhalten. STLs werden nicht eingebettet.",
+        "en": "Saves format version 1 with configuration, full SHA-256 source hashes, stable figure ids and individual rotations, offsets and grip positions. Imported grip settings are retained while finger recesses are disabled. STLs are not embedded.",
     },
     # --- Sidebar: Druckeinstellungen ---------------------------------------
     "app.printer.heading": {
@@ -853,7 +857,7 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Die Figur",
         "en": "The figure",
     },
-    # --- Versionierte Projektdateien -----------------------------------------
+    # --- Versioned project files ---------------------------------------------
     "project.invalid_json": {
         "de": "Die Projektdatei ist kein gültiges UTF-8-JSON.",
         "en": "The project file is not valid UTF-8 JSON.",
@@ -897,10 +901,6 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "project.source_changed": {
         "de": "Quelldatei für '{name}' wurde seit dem Export verändert: {path}",
         "en": "Source file for '{name}' has changed since the project was exported: {path}",
-    },
-    "project.web_value": {
-        "de": "Der Wert von '{field}' kann in der Weboberfläche nicht verlustfrei dargestellt werden. Das Projekt wurde nicht verändert; nutze die CLI oder passe das Rezept an.",
-        "en": "The value of '{field}' cannot be represented losslessly in the web app. The project was not changed; use the CLI or adjust the recipe.",
     },
     # --- CLI ----------------------------------------------------------------
     "cli.description": {

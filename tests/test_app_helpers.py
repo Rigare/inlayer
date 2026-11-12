@@ -109,7 +109,7 @@ class TestProjectSessionState:
         assert not {"persistent-one", "persistent-two"} & set(stored)
         first = stored["temporary-upload-b"]
         second = stored["temporary-upload-a"]
-        assert (first["rot_x"], first["rot_y"], first["rot_z"]) == (10.0, 45.0, 0.0)
+        assert (first["rot_x"], first["rot_y"], first["rot_z"]) == (370.0, 45.0, 0.0)
         assert (second["rot_x"], second["rot_y"], second["rot_z"]) == (0.0, 0.0, 90.0)
         assert (first["offset_x"], first["offset_y"], first["offset_z"]) == (1.0, 2.0, 3.0)
         assert (second["offset_x"], second["offset_y"], second["offset_z"]) == (-1.0, 0.0, 4.0)
@@ -119,14 +119,19 @@ class TestProjectSessionState:
         assert values["manual_rotations"] is True
         assert values["figure_gap"] == values["_sl_figure_gap"] == 2.0
 
-    def test_global_and_individual_offsets_are_combined_for_the_widgets(self):
+    def test_global_and_individual_offsets_stay_separate_until_application(self):
         recipe = self._recipe()
         recipe = replace(recipe, config=replace(
             recipe.config, offset_x=2.0, offset_y=-1.0, offset_z=1.0,
         ))
-        _, stored = app_helpers.project_session_state(recipe, ["first", "second"])
-        assert [stored["first"][f"offset_{axis}"] for axis in "xyz"] == [3.0, 1.0, 4.0]
-        assert [stored["second"][f"offset_{axis}"] for axis in "xyz"] == [1.0, -1.0, 5.0]
+        values, stored = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["_project_config_base"] == recipe.config
+        assert [stored["first"][f"offset_{axis}"] for axis in "xyz"] == [1.0, 2.0, 3.0]
+        assert [stored["second"][f"offset_{axis}"] for axis in "xyz"] == [-1.0, 0.0, 4.0]
+        applied = app_helpers.applied_figure_params(
+            stored, ["first", "second"], True, True, True, (2.0, -1.0, 1.0),
+        )
+        assert [figure["offset"] for figure in applied] == [(3.0, 1.0, 4.0), (1.0, -1.0, 5.0)]
 
     @pytest.mark.parametrize("shape,dimensions", [
         ("box", {"box_height": 30.0}),
@@ -135,11 +140,13 @@ class TestProjectSessionState:
         ("cylinder", {"box_height": 30.0}),
         ("cylinder", {"box_diameter": 60.0}),
     ])
-    def test_partial_active_box_dimensions_are_rejected(self, shape, dimensions):
+    def test_partial_active_box_dimensions_preserve_automatic_fields(self, shape, dimensions):
         recipe = self._recipe()
         recipe = replace(recipe, config=replace(recipe.config, box_shape=shape, **dimensions))
-        with pytest.raises(inlayer_project.ProjectError, match="box_"):
-            app_helpers.project_session_state(recipe, ["first", "second"])
+        values, _ = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["_project_config_base"] == recipe.config
+        assert values["use_custom_box"] is True
+        assert recipe.config.figure_gap is None
 
     @pytest.mark.parametrize("shape,dimensions", [
         ("box", {"box_diameter": 80.0}),
@@ -169,7 +176,7 @@ class TestProjectSessionState:
         ("offset", 0.5),
         ("finger_recess_position", 0.12),
     ])
-    def test_values_the_widgets_would_change_are_rejected(self, field, value):
+    def test_values_outside_the_widget_palette_are_preserved_exactly(self, field, value):
         recipe = self._recipe()
         if field in inlayer.Config.__dataclass_fields__ and field != "finger_recess_position":
             recipe = replace(recipe, config=replace(recipe.config, **{field: value}))
@@ -179,9 +186,37 @@ class TestProjectSessionState:
                 field: (value, *getattr(first, field)[1:]),
             }
             recipe = replace(recipe, figures=(replace(first, **changed), *recipe.figures[1:]))
-        with pytest.raises(inlayer_project.ProjectError) as error:
-            app_helpers.project_session_state(recipe, ["first", "second"])
-        assert field.split("_")[0] in str(error.value)
+        values, stored = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["_project_config_base"] == recipe.config
+        assert stored["first"]["rot_x"] == recipe.figures[0].rotation[0]
+        assert stored["first"]["offset_x"] == recipe.figures[0].offset[0]
+        assert stored["first"]["finger_recess_position"] == recipe.figures[0].finger_recess_position
+        assert values["_project_config_edits"] == {}
+        exact_fields = values["_project_exact_figure_fields"]
+        assert isinstance(exact_fields, dict)
+        assert exact_fields["first"] == set(app_helpers.FIGURE_DEFAULTS)
+
+    def test_extreme_valid_values_never_enter_widget_state(self):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(
+            recipe.config, decimate_faces=10 ** 400, stl_unit_to_mm=1e308,
+            clearance=1e308, figure_gap=1e308,
+        ), figures=(replace(recipe.figures[0], rotation=(1e308, -1e308, 12.5),
+                            offset=(1e308, -1e308, 0.5)), recipe.figures[1]))
+        values, stored = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["_project_config_base"] == recipe.config
+        assert values["decimate_faces"] == inlayer.Config.decimate_faces
+        assert values["scale"] == inlayer.Config.stl_unit_to_mm
+        assert stored["first"]["rot_x"] == 1e308
+        assert stored["first"]["offset_y"] == -1e308
+
+    def test_cancelling_global_and_individual_offsets_keep_the_feature_enabled(self):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(recipe.config, offset_x=1.0), figures=tuple(
+            replace(figure, offset=(-1.0, 0.0, 0.0)) for figure in recipe.figures
+        ))
+        values, _ = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["manual_offsets"] is True
 
 
 class TestPreviewCopy:
