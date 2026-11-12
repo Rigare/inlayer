@@ -224,6 +224,23 @@ content_hashes = {
 }
 st.session_state["_hash_by_file_id"] = content_hashes
 
+# The fallback file has no upload id. Hash it on every rerun so replacing or
+# removing it changes the staleness snapshot just like an uploaded input.
+fallback_path = inlayer.DEFAULT_INPUT
+fallback_hash = None
+fallback_read_error = None
+if not uploaded_files and os.path.isfile(fallback_path):
+    try:
+        fallback_hash = app_helpers.file_hash(fallback_path)
+    except OSError as error:
+        # An unavailable input marks old results stale; Generate reports why.
+        fallback_read_error = error
+input_snapshot = (
+    [(uf.name, content_hashes[uf.file_id]) for uf in uploaded_files]
+    if uploaded_files
+    else [(fallback_path, fallback_hash)] if fallback_hash is not None else []
+)
+
 # --- Per-figure state -------------------------------------------------------
 # Deliberately right after the upload: the finger recess controls sit further
 # up the sidebar than the manual offsets and already address single figures.
@@ -279,6 +296,21 @@ def _select(label: str, labels: dict, key: str, default, **kwargs):
         on_change=lambda: st.session_state.update({key: st.session_state[widget_key]}),
         **kwargs,
     )
+
+
+def _persistent_number(widget, label: str, key: str, default: float, **kwargs):
+    """Numeric widget whose value survives Streamlit dropping a hidden widget."""
+    stored_key = f"_{key}_value"
+    st.session_state.setdefault(stored_key, default)
+    if key not in st.session_state:
+        st.session_state[key] = st.session_state[stored_key]
+    value = widget(
+        label, key=key,
+        on_change=lambda: st.session_state.update({stored_key: st.session_state[key]}),
+        **kwargs,
+    )
+    st.session_state[stored_key] = value
+    return value
 
 
 def _step_select(label: str, options: list[float], unit: str, step_key: str) -> float:
@@ -441,14 +473,13 @@ finger_radius = inlayer.Config.finger_radius
 finger_recess_axis = inlayer.Config.finger_recess_axis
 finger_recess_z_offset = inlayer.Config.finger_recess_z_offset
 if enable_finger_recesses:
-    finger_radius = st.sidebar.slider(
-        t("app.finger.radius.label"),
+    finger_radius = _persistent_number(
+        st.sidebar.slider, t("app.finger.radius.label"), "finger_radius",
+        inlayer.Config.finger_radius,
         min_value=5.0,
         max_value=15.0,
-        value=inlayer.Config.finger_radius,
         step=0.5,
         help=t("app.finger.radius.help"),
-        key="finger_radius",
     )
     finger_recess_axis = _select(
         t("app.finger.axis.label"),
@@ -456,14 +487,13 @@ if enable_finger_recesses:
         inlayer.Config.finger_recess_axis,
         help=t("app.finger.axis.help"),
     )
-    finger_recess_z_offset = st.sidebar.slider(
-        t("app.finger.z_offset.label"),
+    finger_recess_z_offset = _persistent_number(
+        st.sidebar.slider, t("app.finger.z_offset.label"), "finger_z_offset",
+        inlayer.Config.finger_recess_z_offset,
         min_value=0.0,
         max_value=30.0,
-        value=inlayer.Config.finger_recess_z_offset,
         step=0.5,
         help=t("app.finger.z_offset.help"),
-        key="finger_z_offset",
     )
     # Position along the figure. Unlike radius, axis and depth this one is
     # stored per figure: the best grip point follows the figure's shape, so one
@@ -505,11 +535,23 @@ box_height = None
 box_diameter = None
 if use_custom_box:
     if box_shape == "cylinder":
-        box_diameter = st.sidebar.number_input(t("app.box.diameter.label"), min_value=10.0, max_value=300.0, value=50.0, step=5.0, key="box_diameter")
+        box_diameter = _persistent_number(
+            st.sidebar.number_input, t("app.box.diameter.label"), "box_diameter", 50.0,
+            min_value=10.0, max_value=300.0, step=5.0,
+        )
     else:
-        box_width = st.sidebar.number_input(t("app.box.width.label"), min_value=10.0, max_value=300.0, value=50.0, step=5.0, key="box_width")
-        box_depth = st.sidebar.number_input(t("app.box.depth.label"), min_value=10.0, max_value=300.0, value=50.0, step=5.0, key="box_depth")
-    box_height = st.sidebar.number_input(t("app.box.height.label"), min_value=5.0, max_value=200.0, value=20.0, step=2.0, key="box_height")
+        box_width = _persistent_number(
+            st.sidebar.number_input, t("app.box.width.label"), "box_width", 50.0,
+            min_value=10.0, max_value=300.0, step=5.0,
+        )
+        box_depth = _persistent_number(
+            st.sidebar.number_input, t("app.box.depth.label"), "box_depth", 50.0,
+            min_value=10.0, max_value=300.0, step=5.0,
+        )
+    box_height = _persistent_number(
+        st.sidebar.number_input, t("app.box.height.label"), "box_height", 20.0,
+        min_value=5.0, max_value=200.0, step=2.0,
+    )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(t("app.position.heading"))
@@ -654,7 +696,7 @@ def _params_snapshot() -> dict:
     enable_parallel is left out on purpose - it only changes the runtime.
     """
     return {
-        "files": [(uf.name, content_hashes[uf.file_id]) for uf in uploaded_files],
+        "files": input_snapshot,
         "clearance": clearance,
         "wall_thickness": wall_thickness,
         "depth_fraction": depth_fraction,
@@ -691,7 +733,6 @@ if run_btn:
     tmp_paths: list[str] = []
     try:
         # Input: the uploads, or the default file next to the app
-        fallback_path = inlayer.DEFAULT_INPUT
         input_paths: list[str] = []
         file_names: list[str] = []
         file_hashes: list[str] = []
@@ -709,10 +750,12 @@ if run_btn:
                 input_paths.append(tmp_paths[-1])
                 file_names.append(_labels[uf.file_id])
                 file_hashes.append(content_hashes[uf.file_id])
-        elif os.path.isfile(fallback_path):
+        elif fallback_read_error is not None:
+            raise fallback_read_error
+        elif fallback_hash is not None:
             input_paths = [fallback_path]
             file_names = [fallback_path]
-            file_hashes = [app_helpers.file_hash(fallback_path)]
+            file_hashes = [fallback_hash]
         else:
             st.error(t("app.error.no_input", path=fallback_path))
             st.stop()

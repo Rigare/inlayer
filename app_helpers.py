@@ -169,8 +169,9 @@ def preview_copy(mesh: trimesh.Trimesh, face_count: int) -> trimesh.Trimesh:
 def load_preview_mesh(data: bytes, scale: float, name: str) -> trimesh.Trimesh:
     """Loads an uploaded STL, decimated for the instant preview.
 
-    Raises ValueError naming the file if it holds no triangles (same loader as
-    the pipeline, so preview and run reject the same files).
+    Rejects unreadable files and meshes without usable triangles or area,
+    naming the upload. Flat surfaces can appear here; only generation repairs
+    the mesh and checks whether it can form a solid.
     """
     mesh = inlayer.load_mesh(io.BytesIO(data), name, file_type="stl")
     if scale != 1.0:
