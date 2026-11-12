@@ -21,7 +21,7 @@ import inlayer
 from inlayer import Config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_FILES = ("app.py", "inlayer.py", "app_helpers.py")
+SOURCE_FILES = ("app.py", "inlayer.py", "app_helpers.py", "inlayer_project.py")
 
 # Keys the code only assembles at runtime (f-strings such as
 # t(f"app.layout.{x}")). The AST scan cannot resolve them, so they are listed

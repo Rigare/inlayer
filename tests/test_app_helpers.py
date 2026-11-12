@@ -8,6 +8,7 @@ waehrend `app.py` beim Import st.set_page_config() aufruft.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from typing import cast
 
 import numpy as np
@@ -15,6 +16,8 @@ import pytest
 import trimesh
 
 import app_helpers
+import inlayer
+import inlayer_project
 from tests.conftest import binary_stl
 
 
@@ -79,6 +82,106 @@ class TestAppliedFigureParams:
     def test_unknown_figure_gets_the_defaults(self):
         (x,) = app_helpers.applied_figure_params({}, ["new"], True, True, True)
         assert x["offset"] == (0.0, 0.0, 0.0) and x["recess_position"] == 0.0
+
+
+class TestProjectSessionState:
+    @staticmethod
+    def _recipe():
+        config = inlayer.Config(
+            voxel_pitch=1.0, decimate_faces=5000, enable_finger_recesses=True,
+        )
+        sources = [
+            inlayer_project.SourceIdentity("model.stl", inlayer_project.bytes_hash(data))
+            for data in (b"first", b"second")
+        ]
+        return inlayer_project.new_project(
+            config, sources,
+            rotations=[(370.0, 45.0, 0.0), (0.0, 0.0, 90.0)],
+            offsets=[(1.0, 2.0, 3.0), (-1.0, 0.0, 4.0)],
+            recess_positions=[0.25, -0.5], figure_ids=["persistent-one", "persistent-two"],
+        )
+
+    def test_same_named_sources_map_to_upload_ids_only_once(self):
+        values, stored = app_helpers.project_session_state(
+            self._recipe(), ["temporary-upload-b", "temporary-upload-a"]
+        )
+        assert set(stored) == {"temporary-upload-a", "temporary-upload-b"}
+        assert not {"persistent-one", "persistent-two"} & set(stored)
+        first = stored["temporary-upload-b"]
+        second = stored["temporary-upload-a"]
+        assert (first["rot_x"], first["rot_y"], first["rot_z"]) == (10.0, 45.0, 0.0)
+        assert (second["rot_x"], second["rot_y"], second["rot_z"]) == (0.0, 0.0, 90.0)
+        assert (first["offset_x"], first["offset_y"], first["offset_z"]) == (1.0, 2.0, 3.0)
+        assert (second["offset_x"], second["offset_y"], second["offset_z"]) == (-1.0, 0.0, 4.0)
+        assert first["finger_recess_position"] == 0.25
+        assert second["finger_recess_position"] == -0.5
+        assert values["manual_offsets"] is True
+        assert values["manual_rotations"] is True
+        assert values["figure_gap"] == values["_sl_figure_gap"] == 2.0
+
+    def test_global_and_individual_offsets_are_combined_for_the_widgets(self):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(
+            recipe.config, offset_x=2.0, offset_y=-1.0, offset_z=1.0,
+        ))
+        _, stored = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert [stored["first"][f"offset_{axis}"] for axis in "xyz"] == [3.0, 1.0, 4.0]
+        assert [stored["second"][f"offset_{axis}"] for axis in "xyz"] == [1.0, -1.0, 5.0]
+
+    @pytest.mark.parametrize("shape,dimensions", [
+        ("box", {"box_height": 30.0}),
+        ("box", {"box_width": 50.0}),
+        ("box", {"box_width": 50.0, "box_depth": 60.0}),
+        ("cylinder", {"box_height": 30.0}),
+        ("cylinder", {"box_diameter": 60.0}),
+    ])
+    def test_partial_active_box_dimensions_are_rejected(self, shape, dimensions):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(recipe.config, box_shape=shape, **dimensions))
+        with pytest.raises(inlayer_project.ProjectError, match="box_"):
+            app_helpers.project_session_state(recipe, ["first", "second"])
+
+    @pytest.mark.parametrize("shape,dimensions", [
+        ("box", {"box_diameter": 80.0}),
+        ("cylinder", {"box_width": 80.0, "box_depth": 60.0}),
+    ])
+    def test_inactive_dimensions_do_not_enable_a_custom_box(self, shape, dimensions):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(recipe.config, box_shape=shape, **dimensions))
+        values, _ = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["use_custom_box"] is False
+
+    @pytest.mark.parametrize("shape,dimensions", [
+        ("box", {"box_width": 50.0, "box_depth": 60.0, "box_height": 30.0}),
+        ("cylinder", {"box_diameter": 60.0, "box_height": 30.0}),
+    ])
+    def test_complete_active_box_dimensions_are_preserved(self, shape, dimensions):
+        recipe = self._recipe()
+        recipe = replace(recipe, config=replace(recipe.config, box_shape=shape, **dimensions))
+        values, _ = app_helpers.project_session_state(recipe, ["first", "second"])
+        assert values["use_custom_box"] is True
+        assert all(values[field] == value for field, value in dimensions.items())
+
+    @pytest.mark.parametrize("field,value", [
+        ("clearance", 0.25),
+        ("decimate_faces", 1000),
+        ("rotation", 12.5),
+        ("offset", 0.5),
+        ("finger_recess_position", 0.12),
+    ])
+    def test_values_the_widgets_would_change_are_rejected(self, field, value):
+        recipe = self._recipe()
+        if field in inlayer.Config.__dataclass_fields__ and field != "finger_recess_position":
+            recipe = replace(recipe, config=replace(recipe.config, **{field: value}))
+        else:
+            first = recipe.figures[0]
+            changed = {"finger_recess_position": value} if field == "finger_recess_position" else {
+                field: (value, *getattr(first, field)[1:]),
+            }
+            recipe = replace(recipe, figures=(replace(first, **changed), *recipe.figures[1:]))
+        with pytest.raises(inlayer_project.ProjectError) as error:
+            app_helpers.project_session_state(recipe, ["first", "second"])
+        assert field.split("_")[0] in str(error.value)
 
 
 class TestPreviewCopy:

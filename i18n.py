@@ -147,6 +147,30 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "📂 {n} Figuren geladen – automatische Anordnung aktiv",
         "en": "📂 {n} figures loaded – automatic arrangement active",
     },
+    "app.project.upload.label": {
+        "de": "Projekt öffnen (JSON, optional)",
+        "en": "Open project (JSON, optional)",
+    },
+    "app.project.upload.help": {
+        "de": "Formatversion 1. Lade zusätzlich alle ursprünglichen STLs hoch. Ihre SHA-256-Hashes müssen übereinstimmen; die Dateinamen und ihre Reihenfolge sind unwichtig. STLs sind nicht im JSON eingebettet.",
+        "en": "Format version 1. Also upload all original STLs. Their SHA-256 hashes must match; file names and order do not matter. STLs are not embedded in the JSON.",
+    },
+    "app.project.imported": {
+        "de": "Projekt geladen: {n} Figuren und ihre Quellen wurden per SHA-256 geprüft.",
+        "en": "Project loaded: {n} figures and their sources were verified by SHA-256.",
+    },
+    "app.project.heading": {
+        "de": "### 💾 Projekt",
+        "en": "### 💾 Project",
+    },
+    "app.project.download": {
+        "de": "Projekt als JSON speichern",
+        "en": "Download project as JSON",
+    },
+    "app.project.download.help": {
+        "de": "Speichert Formatversion 1 mit Konfiguration, vollständigen SHA-256-Quellhashes, stabilen Figuren-IDs sowie individuellen Rotationen, Offsets und Griffpositionen. Deaktivierte individuelle Funktionen werden mit ihren wirksamen Nullwerten gespeichert. STLs werden nicht eingebettet.",
+        "en": "Saves format version 1 with configuration, full SHA-256 source hashes, stable figure ids and individual rotations, offsets and grip positions. Disabled individual features are saved with their effective zero values. STLs are not embedded.",
+    },
     # --- Sidebar: Druckeinstellungen ---------------------------------------
     "app.printer.heading": {
         "de": "### 📐 FDM-Drucker Einstellungen",
@@ -829,6 +853,55 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
         "de": "Die Figur",
         "en": "The figure",
     },
+    # --- Versionierte Projektdateien -----------------------------------------
+    "project.invalid_json": {
+        "de": "Die Projektdatei ist kein gültiges UTF-8-JSON.",
+        "en": "The project file is not valid UTF-8 JSON.",
+    },
+    "project.too_large": {
+        "de": "Die Projektdatei ist größer als die erlaubten {limit} Bytes.",
+        "en": "The project file exceeds the allowed {limit} bytes.",
+    },
+    "project.invalid_field": {
+        "de": "Ungültiges oder unbekanntes Feld im Projekt: {field}",
+        "en": "Invalid or unknown field in the project: {field}",
+    },
+    "project.missing_field": {
+        "de": "Pflichtfeld im Projekt fehlt: {field}",
+        "en": "Required project field is missing: {field}",
+    },
+    "project.unsupported_format": {
+        "de": "Die Datei ist kein Inlayer-Projekt (Format: {value}).",
+        "en": "The file is not an Inlayer project (format: {value}).",
+    },
+    "project.unsupported_version": {
+        "de": "Projektversion {version} wird nicht unterstützt; diese Version liest ausschließlich Formatversion 1.",
+        "en": "Project version {version} is not supported; this version only reads format version 1.",
+    },
+    "project.duplicate_id": {
+        "de": "Die Projektdatei enthält eine Figuren-ID mehrfach.",
+        "en": "The project file contains a duplicate figure id.",
+    },
+    "project.source_not_provided": {
+        "de": "Für '{name}' fehlt eine Quelldatei mit dem erwarteten SHA-256-Hash {hash}… . Die Datei wurde möglicherweise verändert oder nicht hochgeladen.",
+        "en": "No source file for '{name}' has the expected SHA-256 hash {hash}… . It may have changed or was not uploaded.",
+    },
+    "project.source_unmatched": {
+        "de": "Die Quelldatei '{name}' gehört nicht zum Projekt oder ihr Inhalt wurde verändert.",
+        "en": "Source file '{name}' does not belong to the project or its content has changed.",
+    },
+    "project.source_missing": {
+        "de": "Quelldatei für '{name}' wurde nicht gefunden: {path}",
+        "en": "Source file for '{name}' was not found: {path}",
+    },
+    "project.source_changed": {
+        "de": "Quelldatei für '{name}' wurde seit dem Export verändert: {path}",
+        "en": "Source file for '{name}' has changed since the project was exported: {path}",
+    },
+    "project.web_value": {
+        "de": "Der Wert von '{field}' kann in der Weboberfläche nicht verlustfrei dargestellt werden. Das Projekt wurde nicht verändert; nutze die CLI oder passe das Rezept an.",
+        "en": "The value of '{field}' cannot be represented losslessly in the web app. The project was not changed; use the CLI or adjust the recipe.",
+    },
     # --- CLI ----------------------------------------------------------------
     "cli.description": {
         "de": "Inlayer: Erstellt 3D-druckbare Verpackungseinleger für Figuren.",
@@ -845,6 +918,34 @@ TRANSLATIONS: Final[dict[str, dict[str, str]]] = {
     "cli.output": {
         "de": "Pfad zur Ausgabe-STL-Datei (Standard: '{default}')",
         "en": "Path to the output STL file (default: '{default}')",
+    },
+    "cli.project": {
+        "de": "Inlayer-Projekt (JSON, Formatversion {version}) öffnen; ohne -i werden die gespeicherten Quellpfade verwendet",
+        "en": "Open an Inlayer project (JSON, format version {version}); without -i its stored source paths are used",
+    },
+    "cli.save_project": {
+        "de": "Konfiguration, Figurenidentitäten und individuelle Einstellungen als versioniertes JSON-Projekt speichern",
+        "en": "Save configuration, figure identities and individual settings as a versioned JSON project",
+    },
+    "cli.project_loaded": {
+        "de": "Projekt {path} geladen und alle {n} Quelldateien per SHA-256 geprüft",
+        "en": "Loaded project {path} and verified all {n} source files by SHA-256",
+    },
+    "cli.project_saved": {
+        "de": "  => Projekt {path} gespeichert",
+        "en": "  => saved project {path}",
+    },
+    "cli.error.project_override": {
+        "de": "{option} kann nicht mit --project kombiniert werden: Die Einstellungen kommen aus dem Projekt. Erlaubt sind -i, -o, --save-project und --lang.",
+        "en": "{option} cannot be combined with --project: settings come from the project. Only -i, -o, --save-project and --lang are allowed.",
+    },
+    "cli.error.project_path_conflict": {
+        "de": "Projektziel {path!r} kollidiert mit Eingabe- oder STL-Ausgabedatei {other!r}.",
+        "en": "Project destination {path!r} conflicts with input or STL output {other!r}.",
+    },
+    "project.read_failed": {
+        "de": "Projektdatei {path} kann nicht gelesen werden: {error}",
+        "en": "Cannot read project file {path}: {error}",
     },
     "cli.clearance": {
         "de": "Spiel zwischen Figur und Aussparung in mm (Standard: {default})",

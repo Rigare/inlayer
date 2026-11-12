@@ -20,6 +20,8 @@ import os
 import time
 import tempfile
 import threading
+import uuid
+from dataclasses import replace
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -29,6 +31,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 import app_helpers
 import i18n
 import inlayer
+import inlayer_project
 from i18n import t
 
 # --- Sprache ----------------------------------------------------------------
@@ -210,28 +213,88 @@ st.sidebar.markdown(t("app.sidebar.pipeline_params"))
 uploaded_files = st.sidebar.file_uploader(
     t("app.upload.label"), type=["stl"], accept_multiple_files=True, key="uploads",
 ) or []
-multi_mode = len(uploaded_files) > 1
-if multi_mode:
-    st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
+project_upload = st.sidebar.file_uploader(
+    t("app.project.upload.label"), type=["json"], accept_multiple_files=False,
+    key="project_upload", help=t("app.project.upload.help"),
+)
 
-# Content hash per upload, computed once per upload rather than on every rerun.
-# It is the identity of a file in every process-wide cache key and in the
-# staleness snapshot - name and size are not (see _preview_mesh).
+# Content hashes per upload, computed once rather than on every rerun. The
+# short digest keys process-wide caches; the full SHA-256 is the persistent
+# source identity in project files. Neither uses a file name as identity.
 _known_hashes = st.session_state.get("_hash_by_file_id", {})
 content_hashes = {
     uf.file_id: _known_hashes.get(uf.file_id) or app_helpers.bytes_hash(uf.getvalue())
     for uf in uploaded_files
 }
 st.session_state["_hash_by_file_id"] = content_hashes
+_known_project_hashes = st.session_state.get("_project_hash_by_file_id", {})
+project_hashes = {
+    uf.file_id: _known_project_hashes.get(uf.file_id)
+    or inlayer_project.bytes_hash(uf.getvalue())
+    for uf in uploaded_files
+}
+st.session_state["_project_hash_by_file_id"] = project_hashes
+
+project_error = None
+project_notice = None
+if project_upload is not None:
+    recipe_bytes = project_upload.getvalue()
+    import_signature = (
+        inlayer_project.bytes_hash(recipe_bytes),
+        tuple((uf.file_id, project_hashes[uf.file_id]) for uf in uploaded_files),
+    )
+    try:
+        recipe = inlayer_project.loads_project(recipe_bytes)
+        if len(uploaded_files) > app_helpers.MAX_UPLOAD_FILES:
+            raise inlayer_project.ProjectError(t(
+                "app.error.too_many_files", n=len(uploaded_files),
+                limit=app_helpers.MAX_UPLOAD_FILES,
+            ))
+        candidates = [
+            inlayer_project.SourceCandidate(uf.name, project_hashes[uf.file_id])
+            for uf in uploaded_files
+        ]
+        matches = inlayer_project.match_project_sources(recipe, candidates)
+        uploaded_files = [uploaded_files[match.candidate_index] for match in matches]
+        if st.session_state.get("_project_import_signature") != import_signature:
+            values, imported_stored = app_helpers.project_session_state(
+                recipe, [uf.file_id for uf in uploaded_files]
+            )
+            st.session_state.update(values)
+            st.session_state["fig_offsets_dict"] = imported_stored
+            st.session_state["_project_id_by_file_id"] = {
+                uf.file_id: match.figure.id for match, uf in zip(matches, uploaded_files)
+            }
+            st.session_state["_project_import_signature"] = import_signature
+        project_notice = t("app.project.imported", n=len(uploaded_files))
+    except inlayer_project.ProjectError as error:
+        project_error = str(error)
+        st.sidebar.error(project_error)
+else:
+    st.session_state.pop("_project_import_signature", None)
+
+multi_mode = len(uploaded_files) > 1
+if multi_mode:
+    st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
+if project_notice is not None:
+    st.sidebar.success(project_notice)
 
 # The fallback file has no upload id. Hash it on every rerun so replacing or
 # removing it changes the staleness snapshot just like an uploaded input.
 fallback_path = inlayer.DEFAULT_INPUT
 fallback_hash = None
+fallback_full_hash = None
 fallback_read_error = None
 if not uploaded_files and os.path.isfile(fallback_path):
     try:
         fallback_hash = app_helpers.file_hash(fallback_path)
+        stat = os.stat(fallback_path)
+        cache_key = (fallback_hash, stat.st_mtime_ns, stat.st_size)
+        cached = st.session_state.get("_fallback_project_hash")
+        if cached is None or cached[0] != cache_key:
+            cached = (cache_key, inlayer_project.file_hash(fallback_path))
+            st.session_state["_fallback_project_hash"] = cached
+        fallback_full_hash = cached[1]
     except OSError as error:
         # An unavailable input marks old results stale; Generate reports why.
         fallback_read_error = error
@@ -687,6 +750,84 @@ applied = app_helpers.applied_figure_params(
 )
 
 
+def _current_config() -> inlayer.Config:
+    """The one configuration used by both the run and the project export."""
+    return inlayer.Config(
+        clearance=clearance,
+        wall_thickness=wall_thickness,
+        depth_fraction=depth_fraction,
+        voxel_pitch=voxel_pitch,
+        decimate_faces=decimate_faces,
+        stl_unit_to_mm=scale,
+        box_shape=box_shape,
+        box_width=box_width,
+        box_depth=box_depth,
+        box_height=box_height,
+        box_diameter=box_diameter,
+        figure_gap=figure_gap,
+        layout_style=layout_style,
+        enable_finger_recesses=enable_finger_recesses,
+        finger_radius=finger_radius,
+        finger_recess_axis=finger_recess_axis,
+        finger_recess_z_offset=finger_recess_z_offset,
+        enable_parallel=enable_parallel,
+    )
+
+
+def _project_config() -> inlayer.Config:
+    """Keep hidden multi-figure choices without changing what a run uses."""
+    config = _current_config()
+    return replace(
+        config,
+        figure_gap=float(st.session_state["figure_gap"])
+        if st.session_state.get("_gap_user_set") else None,
+        layout_style=st.session_state.get("layout_style", config.layout_style),
+    )
+
+
+def _project_json() -> str | None:
+    """Serialize current inputs without ever embedding their STL bytes."""
+    sources = []
+    if uploaded_files:
+        project_ids = st.session_state.setdefault("_project_id_by_file_id", {})
+        for gone in set(project_ids) - set(fig_ids):
+            del project_ids[gone]
+        for file_id in fig_ids:
+            project_ids.setdefault(file_id, str(uuid.uuid4()))
+        figure_ids = [project_ids[file_id] for file_id in fig_ids]
+        sources = [
+            inlayer_project.SourceIdentity(uf.name, project_hashes[uf.file_id])
+            for uf in uploaded_files
+        ]
+    elif fallback_full_hash is not None:
+        figure_ids = [st.session_state.setdefault("_fallback_project_id", str(uuid.uuid4()))]
+        sources = [inlayer_project.SourceIdentity(fallback_path, fallback_full_hash)]
+    else:
+        return None
+    recipe = inlayer_project.new_project(
+        _project_config(), sources,
+        rotations=[values["rotation"] for values in applied],
+        offsets=[values["offset"] for values in applied],
+        recess_positions=[values["recess_position"] for values in applied],
+        figure_ids=figure_ids,
+    )
+    return inlayer_project.dumps_project(recipe)
+
+
+project_json = _project_json() if project_error is None else None
+if project_json is None:
+    st.session_state.pop("_project_export", None)
+else:
+    st.session_state["_project_export"] = project_json
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(t("app.project.heading"))
+    st.sidebar.download_button(
+        label=t("app.project.download"), data=project_json,
+        file_name="inlay-project.json", mime="application/json",
+        help=t("app.project.download.help"), key="project_download",
+    )
+
+
 def _params_snapshot() -> dict:
     """Everything a result depends on, for the "settings changed" check.
 
@@ -730,6 +871,9 @@ with col_right:
 # --- Pipeline ---------------------------------------------------------------
 if run_btn:
     st.session_state.pop("result", None)
+    if project_error is not None:
+        st.error(project_error)
+        st.stop()
     tmp_paths: list[str] = []
     try:
         # Input: the uploads, or the default file next to the app
@@ -765,26 +909,7 @@ if run_btn:
         logger = StreamlitLogger(status_box)
         t_start = time.perf_counter()
 
-        config = inlayer.Config(
-            clearance=clearance,
-            wall_thickness=wall_thickness,
-            depth_fraction=depth_fraction,
-            voxel_pitch=voxel_pitch,
-            decimate_faces=decimate_faces,
-            stl_unit_to_mm=scale,
-            box_shape=box_shape,
-            box_width=box_width,
-            box_depth=box_depth,
-            box_height=box_height,
-            box_diameter=box_diameter,
-            figure_gap=figure_gap,
-            layout_style=layout_style,
-            enable_finger_recesses=enable_finger_recesses,
-            finger_radius=finger_radius,
-            finger_recess_axis=finger_recess_axis,
-            finger_recess_z_offset=finger_recess_z_offset,
-            enable_parallel=enable_parallel,
-        )
+        config = _current_config()
 
         progress = st.progress(0, text=t("app.progress.start"))
         rotations = [a["rotation"] for a in applied]

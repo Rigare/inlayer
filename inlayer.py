@@ -1153,12 +1153,20 @@ def _build_parser() -> argparse.ArgumentParser:
                 default=i18n.get_language(), env=i18n.ENV_VAR),
     )
     parser.add_argument(
-        "-i", "--input", nargs="+", default=[DEFAULT_INPUT],
+        "-i", "--input", nargs="+", default=None,
         help=t_("cli.input")
     )
     parser.add_argument(
         "-o", "--output", default="inlay.stl",
         help=t_("cli.output", default="inlay.stl")
+    )
+    parser.add_argument(
+        "--project", default=None,
+        help=t_("cli.project", version=1)
+    )
+    parser.add_argument(
+        "--save-project", default=None,
+        help=t_("cli.save_project")
     )
     parser.add_argument(
         "-c", "--clearance", type=float, default=Config.clearance,
@@ -1278,79 +1286,171 @@ def main(argv: list[str] | None = None) -> int:
     # evaluates the help texts while the arguments are added, a --lang parsed
     # later would come too late for them. So the option is fished out of argv
     # up front; without it INLAYER_LANG decides.
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--lang", choices=sorted(i18n.LANGUAGES))
-    pre_args, _ = pre.parse_known_args(argv)
+    pre_args, _ = pre.parse_known_args(raw_argv)
     i18n.set_language(pre_args.lang or i18n.language_from_env())
 
     parser = _build_parser()
-    args = parser.parse_args(argv)
-    input_paths = args.input
+    # A supplied value can equal its default, and argparse accepts attached
+    # short values and long-option abbreviations. Track the parsed actions.
+    omitted = object()
+    config_actions = [
+        action for action in parser._actions
+        if action.dest not in {"help", "input", "output", "project", "save_project", "lang"}
+    ]
+    args = parser.parse_args(
+        raw_argv,
+        namespace=argparse.Namespace(**{action.dest: omitted for action in config_actions}),
+    )
+    supplied_config = []
+    for action in config_actions:
+        if getattr(args, action.dest) is omitted:
+            setattr(args, action.dest, action.default)
+        else:
+            supplied_config.append(action)
+    import inlayer_project as project_io
 
-    # Everything that can be rejected is rejected here, before minutes of
-    # voxel work: argparse then prints a usage error instead of a traceback.
-    for path in input_paths:
-        if not os.path.isfile(path):
-            parser.error(t_("error.input_not_found", path=path))
-    # The inlay is written after all the work is done - a typo in the output
-    # directory used to cost the whole run.
-    out_dir = os.path.dirname(os.path.abspath(args.output))
-    if (
-        not args.output
-        or args.output.endswith((os.sep, os.altsep or os.sep))
-        or os.path.isdir(args.output)
-        or not os.path.isdir(out_dir)
-        or not os.access(args.output if os.path.exists(args.output) else out_dir, os.W_OK)
-    ):
-        parser.error(t_("cli.error.output_not_writable", path=args.output))
-    # The rotations are the only numbers that do not pass through Config and
-    # its checks: --rot-x nan ran the whole pipeline on a mesh of NaNs and
-    # wrote a solid block.
-    for name in ("rot_x", "rot_y", "rot_z"):
-        if not math.isfinite(getattr(args, name)):
-            parser.error(t_("config.must_be_finite", name=name, value=getattr(args, name)))
-    # One recess position applies to every figure, otherwise one per input
-    # file - only checked when recesses are on, the flag does nothing else.
-    recess_positions = args.finger_recess_position or [Config.finger_recess_position]
-    for value in recess_positions:
-        if not -1.0 <= value <= 1.0:
-            parser.error(t_("config.bad_finger_position", value=value))
-    if len(recess_positions) == 1:
-        recess_positions = recess_positions * len(input_paths)
-    elif args.finger_recesses and len(recess_positions) != len(input_paths):
-        parser.error(
-            t_("cli.error.recess_position_count",
-               given=len(recess_positions), n=len(input_paths))
-        )
-    if args.finger_recess_position is not None and not args.finger_recesses:
-        # Whatever was passed - the note used to appear for a wrong count only
-        print(t_("cli.recess_position_ignored"))
-    try:
-        config = Config(
-            clearance=args.clearance,
-            wall_thickness=args.wall_thickness,
-            depth_fraction=args.depth_fraction,
-            voxel_pitch=args.voxel_pitch,
-            decimate_faces=args.decimate_faces,
-            stl_unit_to_mm=args.scale,
-            box_shape=args.box_shape,
-            box_width=args.box_width,
-            box_depth=args.box_depth,
-            box_height=args.box_height,
-            box_diameter=args.box_diameter,
-            offset_x=args.offset_x,
-            offset_y=args.offset_y,
-            offset_z=args.offset_z,
-            figure_gap=args.figure_gap,
-            layout_style=args.layout_style,
-            enable_finger_recesses=args.finger_recesses,
-            finger_radius=args.finger_radius,
-            finger_recess_axis=args.finger_recess_axis,
-            finger_recess_z_offset=args.finger_recess_z_offset,
-            enable_parallel=args.parallel,
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
+    if args.project:
+        if supplied_config:
+            parser.error(t_(
+                "cli.error.project_override", option=supplied_config[0].option_strings[-1],
+            ))
+        try:
+            project = project_io.load_project(args.project)
+        except project_io.ProjectError as exc:
+            parser.error(str(exc))
+        except OSError as exc:
+            parser.error(t_("project.read_failed", path=args.project, error=exc))
+        try:
+            resolved_sources = project_io.resolve_project_paths(
+                project, args.input, project_path=args.project
+            )
+        except (project_io.ProjectError, OSError) as exc:
+            parser.error(str(exc))
+        input_paths = [source.path for source in resolved_sources]
+        file_names = [source.figure.source.name for source in resolved_sources]
+        config = project.config
+        rotations = [source.figure.rotation for source in resolved_sources]
+        individual_offsets = project_io.effective_offsets(project)
+        recess_positions = [source.figure.finger_recess_position for source in resolved_sources]
+        print(t_("cli.project_loaded", path=args.project, n=len(input_paths)))
+    else:
+        project = None
+        resolved_sources = None
+        input_paths = args.input or [DEFAULT_INPUT]
+        file_names = input_paths
+        for path in input_paths:
+            if not os.path.isfile(path):
+                parser.error(t_("error.input_not_found", path=path))
+        for name in ("rot_x", "rot_y", "rot_z"):
+            if not math.isfinite(getattr(args, name)):
+                parser.error(t_("config.must_be_finite", name=name, value=getattr(args, name)))
+        rotations = [(args.rot_x, args.rot_y, args.rot_z)] * len(input_paths)
+        individual_offsets = None
+        recess_positions = args.finger_recess_position or [Config.finger_recess_position]
+        for value in recess_positions:
+            if not -1.0 <= value <= 1.0:
+                parser.error(t_("config.bad_finger_position", value=value))
+        if len(recess_positions) == 1:
+            recess_positions = recess_positions * len(input_paths)
+        elif args.finger_recesses and len(recess_positions) != len(input_paths):
+            parser.error(t_(
+                "cli.error.recess_position_count",
+                given=len(recess_positions), n=len(input_paths),
+            ))
+        if args.finger_recess_position is not None and not args.finger_recesses:
+            print(t_("cli.recess_position_ignored"))
+        try:
+            config = Config(
+                clearance=args.clearance,
+                wall_thickness=args.wall_thickness,
+                depth_fraction=args.depth_fraction,
+                voxel_pitch=args.voxel_pitch,
+                decimate_faces=args.decimate_faces,
+                stl_unit_to_mm=args.scale,
+                box_shape=args.box_shape,
+                box_width=args.box_width,
+                box_depth=args.box_depth,
+                box_height=args.box_height,
+                box_diameter=args.box_diameter,
+                offset_x=args.offset_x,
+                offset_y=args.offset_y,
+                offset_z=args.offset_z,
+                figure_gap=args.figure_gap,
+                layout_style=args.layout_style,
+                enable_finger_recesses=args.finger_recesses,
+                finger_radius=args.finger_radius,
+                finger_recess_axis=args.finger_recess_axis,
+                finger_recess_z_offset=args.finger_recess_z_offset,
+                enable_parallel=args.parallel,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # Reject unwritable destinations before hashing or any voxel work.
+    for output_path in (args.output, args.save_project):
+        if output_path is None:
+            continue
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        if (
+            not output_path
+            or output_path.endswith((os.sep, os.altsep or os.sep))
+            or os.path.isdir(output_path)
+            or not os.path.isdir(out_dir)
+            or not os.access(output_path if os.path.exists(output_path) else out_dir, os.W_OK)
+        ):
+            parser.error(t_("cli.error.output_not_writable", path=output_path))
+
+    if args.save_project:
+        for other_path in [*input_paths, args.output]:
+            same_path = os.path.realpath(args.save_project) == os.path.realpath(other_path)
+            same_file = (
+                os.path.exists(args.save_project) and os.path.exists(other_path)
+                and os.path.samefile(args.save_project, other_path)
+            )
+            if same_path or same_file:
+                parser.error(t_(
+                    "cli.error.project_path_conflict", path=args.save_project, other=other_path,
+                ))
+
+    project_to_save = None
+    if args.save_project:
+        try:
+            if project is None:
+                sources = [
+                    project_io.SourceIdentity(
+                        os.path.basename(path), project_io.file_hash(path), path
+                    )
+                    for path in input_paths
+                ]
+                export_rotations = rotations
+                export_offsets = [(0.0, 0.0, 0.0)] * len(input_paths)
+                export_positions = (
+                    recess_positions if config.enable_finger_recesses
+                    else [config.finger_recess_position] * len(input_paths)
+                )
+                export_ids = None
+            else:
+                assert resolved_sources is not None
+                sources = [
+                    project_io.SourceIdentity(
+                        source.figure.source.name, source.figure.source.sha256, source.path
+                    )
+                    for source in resolved_sources
+                ]
+                export_rotations = [figure.rotation for figure in project.figures]
+                export_offsets = [figure.offset for figure in project.figures]
+                export_positions = [figure.finger_recess_position for figure in project.figures]
+                export_ids = [figure.id for figure in project.figures]
+            project_to_save = project_io.new_project(
+                config, sources, rotations=export_rotations, offsets=export_offsets,
+                recess_positions=export_positions, figure_ids=export_ids,
+                project_path=args.save_project,
+            )
+        except (project_io.ProjectError, OSError) as exc:
+            parser.error(str(exc))
 
     multi = len(input_paths) > 1
     t_total = time.perf_counter()
@@ -1366,23 +1466,28 @@ def main(argv: list[str] | None = None) -> int:
             what=t_("pipeline.what.prepare"),
         )
         rotated = [
-            apply_euler_rotation(m, args.rot_x, args.rot_y, args.rot_z) for m in prepared
+            apply_euler_rotation(mesh, *rotation)
+            for mesh, rotation in zip(prepared, rotations)
         ]
 
         # Step 2: tolerance offset per figure (optionally in parallel)
         print(t_("cli.step2"))
         dilated_meshes = _parallel_map(
             lambda item: dilate(item[0], config.clearance, config, name=item[1]),
-            zip(rotated, input_paths), config, what=t_("pipeline.what.dilate"),
+            zip(rotated, file_names), config, what=t_("pipeline.what.dilate"),
         )
 
         # Step 3: arrange, cut and check (build_inlay does all three)
         print(t_("cli.step3"))
         inlay, box_w, box_d, box_h = build_inlay(
-            dilated_meshes, config, file_names=input_paths,
+            dilated_meshes, config, file_names=file_names,
+            individual_offsets=individual_offsets,
             individual_recess_positions=recess_positions if config.enable_finger_recesses else None,
+            sorting_reference=prepared,
         )
         inlay.export(file_obj=args.output, file_type="stl")
+        if project_to_save is not None:
+            project_io.save_project(project_to_save, args.save_project)
     except (ValueError, RuntimeError, OSError, MemoryError) as exc:
         # What the pipeline raises on purpose names the file and the remedy.
         # A traceback on top of it buried that one line; anything else is a
@@ -1391,6 +1496,8 @@ def main(argv: list[str] | None = None) -> int:
         print(t_("cli.error.failed", error=reason), file=sys.stderr)
         return EXIT_FAILED
     print(t_("cli.saved", path=args.output))
+    if project_to_save is not None:
+        print(t_("cli.project_saved", path=args.save_project))
 
     # Step 4: wall check
     print(t_("cli.step4"))

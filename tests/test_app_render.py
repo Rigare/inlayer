@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import io
 import json
 from pathlib import Path
 from typing import cast
@@ -24,6 +25,7 @@ from streamlit.testing.v1 import AppTest
 import app_helpers
 import i18n
 import inlayer
+import inlayer_project
 from tests.conftest import binary_stl
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
@@ -45,6 +47,37 @@ def _upload(at: AppTest, files: list[tuple[str, bytes]]) -> AppTest:
     at.run()
     assert not at.exception, [str(e.value) for e in at.exception]
     return at
+
+
+def _open_project(
+    at: AppTest, files: list[tuple[str, bytes]], recipe: str | bytes
+) -> AppTest:
+    """Upload the recipe and all its sources together, as after a restart."""
+    recipe_bytes = recipe.encode("utf-8") if isinstance(recipe, str) else recipe
+    at.file_uploader[0].set_value([(name, data, "model/stl") for name, data in files])
+    at.file_uploader[1].set_value(("project.json", recipe_bytes, "application/json"))
+    at.run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    return at
+
+
+def _project_recipe(files: list[tuple[str, bytes]]) -> str:
+    config = inlayer.Config(
+        clearance=0.5, wall_thickness=2.0, depth_fraction=0.75,
+        voxel_pitch=1.0, decimate_faces=5000, figure_gap=2.5,
+        enable_finger_recesses=True, finger_radius=5.0, finger_recess_z_offset=1.0,
+    )
+    sources = [
+        inlayer_project.SourceIdentity(name, inlayer_project.bytes_hash(data))
+        for name, data in files
+    ]
+    recipe = inlayer_project.new_project(
+        config, sources,
+        rotations=[(10.0, 20.0, 30.0), (0.0, 15.0, 90.0)],
+        offsets=[(1.0, 0.0, 0.0), (0.0, 2.0, 0.0)],
+        recess_positions=[0.25, -0.25], figure_ids=["figure-one", "figure-two"],
+    )
+    return inlayer_project.dumps_project(recipe)
 
 
 def _checkbox(at: AppTest, key: str):
@@ -748,6 +781,159 @@ def test_widgets_start_with_the_pipeline_defaults():
         ("slider", "_sl_figure_gap", "effective_figure_gap"),
     ]:
         assert _widget(at, kind, key).value == getattr(cfg, field), key
+
+
+class TestProjectRecipes:
+    @staticmethod
+    def _files() -> list[tuple[str, bytes]]:
+        return [
+            ("model.stl", _stl([10, 10, 10])),
+            ("model.stl", _stl([20, 6, 4])),
+        ]
+
+    def test_same_named_sources_import_in_reverse_order_and_export_stable_ids(self):
+        files = self._files()
+        source_recipe = _project_recipe(files)
+        expected = inlayer_project.loads_project(source_recipe)
+        at = _open_project(_run("en"), list(reversed(files)), source_recipe)
+        assert not at.error
+
+        upload_by_project = {
+            project_id: upload_id
+            for upload_id, project_id in at.session_state["_project_id_by_file_id"].items()
+        }
+        assert set(upload_by_project) == {"figure-one", "figure-two"}
+        first = at.session_state["fig_offsets_dict"][upload_by_project["figure-one"]]
+        second = at.session_state["fig_offsets_dict"][upload_by_project["figure-two"]]
+        assert (first["rot_x"], first["rot_y"], first["rot_z"]) == (10.0, 20.0, 30.0)
+        assert (second["rot_x"], second["rot_y"], second["rot_z"]) == (0.0, 15.0, 90.0)
+        assert (first["offset_x"], second["offset_y"]) == (1.0, 2.0)
+        assert first["finger_recess_position"] == 0.25
+        assert second["finger_recess_position"] == -0.25
+
+        exported = inlayer_project.loads_project(at.session_state["_project_export"])
+        assert exported.config == expected.config
+        assert [figure.id for figure in exported.figures] == ["figure-one", "figure-two"]
+        assert [figure.source.sha256 for figure in exported.figures] == [
+            inlayer_project.bytes_hash(data) for _, data in files
+        ]
+        assert all(len(figure.source.sha256) == 64 for figure in exported.figures)
+        assert all(figure.source.path is None for figure in exported.figures)
+        assert [figure.rotation for figure in exported.figures] == [
+            figure.rotation for figure in expected.figures
+        ]
+        assert [figure.offset for figure in exported.figures] == [
+            figure.offset for figure in expected.figures
+        ]
+        assert _widget(at, "download_button", "project_download").label == (
+            i18n.TRANSLATIONS["app.project.download"]["en"]
+        )
+
+        _widget(at, "selectbox", "ui_lang").set_value("de").run()
+        assert not at.exception
+        assert any(i18n.TRANSLATIONS["app.project.imported"]["de"].format(n=2) == item.value
+                   for item in at.success)
+        _widget(at, "slider", "clearance").set_value(0.6).run()
+        assert _widget(at, "slider", "clearance").value == 0.6
+        changed = inlayer_project.loads_project(at.session_state["_project_export"])
+        assert changed.config.clearance == 0.6
+        assert [figure.id for figure in changed.figures] == ["figure-one", "figure-two"]
+
+    def test_automatic_gap_keeps_following_wall_thickness_after_reopening(self):
+        files = self._files()
+        recipe = json.loads(_project_recipe(files))
+        recipe["config"]["figure_gap"] = None
+        original = _open_project(_run("en"), files, json.dumps(recipe))
+        exported = original.session_state["_project_export"]
+        assert inlayer_project.loads_project(exported).config.figure_gap is None
+
+        restarted = _open_project(_run("en"), files, exported)
+        _widget(restarted, "slider", "wall_thickness").set_value(3.0).run()
+        assert not restarted.exception
+        assert restarted.session_state["figure_gap"] == 3.0
+        assert restarted.session_state["_gap_user_set"] is False
+        assert inlayer_project.loads_project(
+            restarted.session_state["_project_export"]
+        ).config.figure_gap is None
+
+    def test_fresh_web_session_reproduces_geometry_and_wall_findings(self):
+        files = self._files()
+        original = _open_project(_run("en"), files, _project_recipe(files))
+        original.button[0].click().run()
+        assert not original.exception and not original.error
+        assert "result" in original.session_state
+        first = original.session_state["result"]
+        exported = original.session_state["_project_export"]
+
+        restarted = _open_project(_run("de"), list(reversed(files)), exported)
+        assert not restarted.error
+        restarted.button[0].click().run()
+        assert not restarted.exception and not restarted.error
+        second = restarted.session_state["result"]
+        for key in ("actual_w", "actual_d", "actual_h"):
+            assert second[key] == pytest.approx(first[key], abs=2e-3)
+        assert second["stats_3d"] == first["stats_3d"]
+        np.testing.assert_allclose(second["placements"], first["placements"], atol=2e-3)
+        np.testing.assert_allclose(
+            [mesh.extents for mesh in second["fig_viz"]],
+            [mesh.extents for mesh in first["fig_viz"]], atol=2e-3,
+        )
+
+        def measured(result):
+            mesh = trimesh.load(io.BytesIO(result["stl_bytes"]), file_type="stl", force="mesh")
+            assert isinstance(mesh, trimesh.Trimesh)
+            return mesh, np.concatenate([mesh.extents, [mesh.volume], mesh.center_mass])
+
+        original_mesh, original_signature = measured(first)
+        reopened_mesh, reopened_signature = measured(second)
+        np.testing.assert_allclose(reopened_signature, original_signature, rtol=1e-5, atol=2e-3)
+        np.testing.assert_allclose(reopened_mesh.bounds, original_mesh.bounds, atol=2e-3)
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    @pytest.mark.parametrize("case", ["missing", "changed", "version", "web_value", "partial_box"])
+    def test_invalid_project_or_source_stops_before_the_pipeline(self, lang, case, monkeypatch):
+        files = self._files()
+        recipe = _project_recipe(files)
+        supplied = files
+        expected_hash = inlayer_project.bytes_hash(files[0][1])
+        if case == "missing":
+            supplied = []
+            expected = i18n.TRANSLATIONS["project.source_not_provided"][lang].format(
+                name="model.stl", hash=expected_hash[:12],
+            )
+        elif case == "changed":
+            supplied = [files[0], ("model.stl", _stl([30, 10, 10]))]
+            expected_hash = inlayer_project.bytes_hash(files[1][1])
+            expected = i18n.TRANSLATIONS["project.source_not_provided"][lang].format(
+                name="model.stl", hash=expected_hash[:12],
+            )
+        elif case == "version":
+            raw = json.loads(recipe)
+            raw["version"] = 99
+            recipe = json.dumps(raw)
+            expected = i18n.TRANSLATIONS["project.unsupported_version"][lang].format(version=99)
+        elif case == "web_value":
+            raw = json.loads(recipe)
+            raw["config"]["clearance"] = 0.25
+            recipe = json.dumps(raw)
+            expected = i18n.TRANSLATIONS["project.web_value"][lang].format(field="clearance")
+        else:
+            raw = json.loads(recipe)
+            raw["config"]["box_height"] = 30.0
+            recipe = json.dumps(raw)
+            expected = i18n.TRANSLATIONS["project.web_value"][lang].format(field="box_width")
+
+        def pipeline_must_not_start(*_args, **_kwargs):
+            raise AssertionError("the pipeline must not start")
+
+        monkeypatch.setattr(inlayer, "prepare_figure", pipeline_must_not_start)
+        at = _open_project(_run(lang), supplied, recipe)
+        assert any(expected in item.value for item in at.error)
+        at.button[0].click().run()
+        assert not at.exception
+        assert any(expected in item.value for item in at.error)
+        assert "result" not in at.session_state
+        assert "_project_export" not in at.session_state
 
 
 def _badges(at: AppTest) -> list[str]:

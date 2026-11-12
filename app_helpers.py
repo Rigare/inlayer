@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 
 
 import trimesh
 
 import inlayer
+import inlayer_project
 from i18n import t
 
 # Chunk-Groesse beim Hashen; haelt den Speicherbedarf bei grossen STLs konstant.
@@ -127,6 +129,123 @@ def applied_figure_params(
             "recess_position": float(s["finger_recess_position"]) if recesses else 0.0,
         })
     return applied
+
+
+def project_session_state(
+    recipe: inlayer_project.Project, figure_ids: list[str]
+) -> tuple[dict[str, object], dict[str, dict[str, float]]]:
+    """Session values for a recipe, rejecting values the widgets would alter.
+
+    Upload ids are only the targets of this one-time mapping. The recipe's own
+    persistent ids stay in the project and are never derived from Streamlit.
+    """
+    if len(figure_ids) != len(recipe.figures):
+        raise inlayer_project.ProjectError(t("project.invalid_field", field="figures"))
+
+    def unsupported(field: str):
+        raise inlayer_project.ProjectError(t("project.web_value", field=field))
+
+    def ranged(field: str, value: float, lo: float, hi: float) -> float:
+        if not lo <= value <= hi:
+            unsupported(field)
+        return value
+
+    def slider(field: str, value: float, lo: float, hi: float, step: float) -> float:
+        ranged(field, value, lo, hi)
+        steps = (value - lo) / step
+        if not math.isclose(steps, round(steps), abs_tol=1e-8):
+            unsupported(field)
+        return round(lo + round(steps) * step, 10)
+
+    def integer(field: str, value: float, lo: float, hi: float) -> float:
+        ranged(field, value, lo, hi)
+        if not math.isclose(value, round(value), abs_tol=1e-8):
+            unsupported(field)
+        return float(round(value))
+
+    config = recipe.config
+    box_fields = ("box_diameter", "box_height") if config.box_shape == "cylinder" else (
+        "box_width", "box_depth", "box_height",
+    )
+    use_custom_box = any(getattr(config, field) is not None for field in box_fields)
+    if use_custom_box:
+        for field in box_fields:
+            if getattr(config, field) is None:
+                unsupported(field)
+    gap = config.wall_thickness if config.figure_gap is None else slider(
+        "figure_gap", config.figure_gap, 0.5, 40.0, 0.5
+    )
+    values: dict[str, object] = {
+        "clearance": slider("clearance", config.clearance, 0.1, 2.0, 0.1),
+        "wall_thickness": slider("wall_thickness", config.wall_thickness, 1.0, 5.0, 0.5),
+        "depth_fraction": slider("depth_fraction", config.depth_fraction, 0.3, 1.0, 0.05),
+        "voxel_pitch": slider("voxel_pitch", config.voxel_pitch, 0.2, 1.0, 0.1),
+        "decimate_faces": ranged("decimate_faces", config.decimate_faces, 5000, 50000),
+        "scale": ranged("stl_unit_to_mm", config.stl_unit_to_mm, 0.01, 100.0),
+        "finger_enabled": config.enable_finger_recesses,
+        "finger_axis": config.finger_recess_axis,
+        "_w_finger_axis": config.finger_recess_axis,
+        "parallel": config.enable_parallel,
+        "box_shape": config.box_shape,
+        "_w_box_shape": config.box_shape,
+        "use_custom_box": use_custom_box,
+        "manual_offsets": any(
+            not math.isclose(value, 0.0, abs_tol=1e-12)
+            for offset in inlayer_project.effective_offsets(recipe) for value in offset
+        ),
+        "manual_rotations": any(
+            not math.isclose(value % 360.0, 0.0, abs_tol=1e-12)
+            for figure in recipe.figures for value in figure.rotation
+        ),
+        "pos_step": 1.0,
+        "rot_step": 1.0,
+        "_w_pos_step": 1.0,
+        "_w_rot_step": 1.0,
+        "layout_style": config.layout_style,
+        "_w_layout_style": config.layout_style,
+        "figure_gap": gap,
+        "_sl_figure_gap": gap,
+        "_ni_figure_gap": gap,
+        "_gap_user_set": config.figure_gap is not None,
+    }
+    for key, field, value, lo, hi in (
+        ("finger_radius", "finger_radius", config.finger_radius, 5.0, 15.0),
+        ("finger_z_offset", "finger_recess_z_offset", config.finger_recess_z_offset, 0.0, 30.0),
+    ):
+        step = 0.5
+        values[key] = slider(field, value, lo, hi, step)
+        values[f"_{key}_value"] = values[key]
+    for key, field, value, default, lo, hi in (
+        ("box_width", "box_width", config.box_width, 50.0, 10.0, 300.0),
+        ("box_depth", "box_depth", config.box_depth, 50.0, 10.0, 300.0),
+        ("box_height", "box_height", config.box_height, 20.0, 5.0, 200.0),
+        ("box_diameter", "box_diameter", config.box_diameter, 50.0, 10.0, 300.0),
+    ):
+        checked = default if value is None else ranged(field, value, lo, hi)
+        values[key] = checked
+        values[f"_{key}_value"] = checked
+
+    stored = {}
+    effective = inlayer_project.effective_offsets(recipe)
+    for figure, upload_id, offset in zip(recipe.figures, figure_ids, effective):
+        rotation = [integer(f"rotation[{i}]", value % 360.0, 0.0, 359.0)
+                    for i, value in enumerate(figure.rotation)]
+        offset = [
+            integer(f"offset_{axis}", value, limits[0], limits[1])
+            for axis, value, limits in zip("xyz", offset, ((-100, 100), (-100, 100), (-50, 150)))
+        ]
+        percent = figure.finger_recess_position * 100.0
+        if not math.isclose(percent / 5.0, round(percent / 5.0), rel_tol=0.0, abs_tol=1e-8):
+            unsupported("finger_recess_position")
+        stored[upload_id] = {
+            **dict(FIGURE_DEFAULTS),
+            **dict(zip(OFFSET_AXES, offset)),
+            **dict(zip(ROTATION_AXES, rotation)),
+            "finger_recess_position": round(percent) / 100.0,
+        }
+    for selection in ("selected_recess_fig", "selected_fig", "selected_rot_fig"):
+        values[f"_ref_{selection}"] = None
+    return values, stored
 
 
 def is_rotation_axis(axis: str) -> bool:
