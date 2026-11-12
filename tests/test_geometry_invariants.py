@@ -225,6 +225,35 @@ class TestFingerRecesses:
             expected = h - z_offset - np.sqrt(r**2 - (r / 2) ** 2)
             assert floor == pytest.approx(expected, abs=0.2)
 
+    @pytest.mark.parametrize("z_offset", [0.0, 4.0])
+    def test_recesses_join_the_cavity_under_an_overhanging_head(self, z_offset):
+        """T figure: a 4 mm stem sunk into the box, a 40 mm head above it.
+        The recesses followed the head's silhouette and ended up 20 mm out,
+        as two holes of their own beside the stem's cavity (OPE-9).
+
+        This one figure is a single solid whose sunk part is one column, so
+        its cavity and both recesses must form one pocket. That is not a rule
+        for every figure - a model of separate parts may leave several."""
+        stem = _box(4, 20, 25)
+        head = _box(40, 20, 5, at=(0.0, 0.0, 25.0))
+        tee = trimesh.boolean.union([stem, head], engine="manifold")
+        cfg = self._cfg(finger_recess_axis="x", finger_recess_z_offset=z_offset)
+        inlay, w, d, h, _ = _build([tee], cfg)
+        assert len(gp.cavities(inlay, w, d, h)) == 1
+        assert inlay.metadata["wall_check"]["passes_min_wall"] is True
+
+    def test_recesses_follow_the_sunk_part_after_a_z_offset(self):
+        """Raising the figure by its own Z offset shrinks the part below the
+        top face; the recesses must still hug what stays sunk. A cone raised
+        until only its narrow tip is sunk: recesses placed on the deeper,
+        wider cross-section would no longer reach the cavity."""
+        cone = trimesh.creation.cone(radius=30.0, height=30.0, sections=64)
+        cone.apply_transform(trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0]))
+        cone.apply_translation([0.0, 0.0, 30.0])  # tip down at z = 0
+        cfg = self._cfg(depth_fraction=0.7)
+        inlay, w, d, h, _ = _build([cone], cfg, individual_offsets=[(0.0, 0.0, 12.0)])
+        assert len(gp.cavities(inlay, w, d, h)) == 1
+
     def test_neighbours_keep_the_gap_to_each_others_recesses(self):
         """Two 6 mm wide figures: each recess overlapped the neighbour's
         cavity and recess (review finder)."""
