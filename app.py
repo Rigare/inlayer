@@ -20,6 +20,8 @@ import os
 import time
 import tempfile
 import threading
+import uuid
+from dataclasses import replace
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -29,6 +31,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 import app_helpers
 import i18n
 import inlayer
+import inlayer_project
 from i18n import t
 
 # --- Sprache ----------------------------------------------------------------
@@ -210,28 +213,90 @@ st.sidebar.markdown(t("app.sidebar.pipeline_params"))
 uploaded_files = st.sidebar.file_uploader(
     t("app.upload.label"), type=["stl"], accept_multiple_files=True, key="uploads",
 ) or []
-multi_mode = len(uploaded_files) > 1
-if multi_mode:
-    st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
+project_upload = st.sidebar.file_uploader(
+    t("app.project.upload.label"), type=["json"], accept_multiple_files=False,
+    key="project_upload", help=t("app.project.upload.help"),
+)
 
-# Content hash per upload, computed once per upload rather than on every rerun.
-# It is the identity of a file in every process-wide cache key and in the
-# staleness snapshot - name and size are not (see _preview_mesh).
+# Content hashes per upload, computed once rather than on every rerun. The
+# short digest keys process-wide caches; the full SHA-256 is the persistent
+# source identity in project files. Neither uses a file name as identity.
 _known_hashes = st.session_state.get("_hash_by_file_id", {})
 content_hashes = {
     uf.file_id: _known_hashes.get(uf.file_id) or app_helpers.bytes_hash(uf.getvalue())
     for uf in uploaded_files
 }
 st.session_state["_hash_by_file_id"] = content_hashes
+_known_project_hashes = st.session_state.get("_project_hash_by_file_id", {})
+project_hashes = {
+    uf.file_id: _known_project_hashes.get(uf.file_id)
+    or inlayer_project.bytes_hash(uf.getvalue())
+    for uf in uploaded_files
+}
+st.session_state["_project_hash_by_file_id"] = project_hashes
+
+project_error = None
+project_notice = None
+if project_upload is not None:
+    recipe_bytes = project_upload.getvalue()
+    import_signature = (
+        inlayer_project.bytes_hash(recipe_bytes),
+        tuple((uf.file_id, project_hashes[uf.file_id]) for uf in uploaded_files),
+    )
+    try:
+        recipe = inlayer_project.loads_project(recipe_bytes)
+        if len(uploaded_files) > app_helpers.MAX_UPLOAD_FILES:
+            raise inlayer_project.ProjectError(t(
+                "app.error.too_many_files", n=len(uploaded_files),
+                limit=app_helpers.MAX_UPLOAD_FILES,
+            ))
+        candidates = [
+            inlayer_project.SourceCandidate(uf.name, project_hashes[uf.file_id])
+            for uf in uploaded_files
+        ]
+        matches = inlayer_project.match_project_sources(recipe, candidates)
+        uploaded_files = [uploaded_files[match.candidate_index] for match in matches]
+        if st.session_state.get("_project_import_signature") != import_signature:
+            values, imported_stored = app_helpers.project_session_state(
+                recipe, [uf.file_id for uf in uploaded_files]
+            )
+            st.session_state.update(values)
+            st.session_state["fig_offsets_dict"] = imported_stored
+            st.session_state["_project_id_by_file_id"] = {
+                uf.file_id: match.figure.id for match, uf in zip(matches, uploaded_files)
+            }
+            st.session_state["_project_import_signature"] = import_signature
+        project_notice = t("app.project.imported", n=len(uploaded_files))
+    except inlayer_project.ProjectError as error:
+        project_error = str(error)
+        st.sidebar.error(project_error)
+else:
+    st.session_state.pop("_project_import_signature", None)
+
+multi_mode = len(uploaded_files) > 1
+if multi_mode:
+    st.sidebar.info(t("app.upload.multi_info", n=len(uploaded_files)))
+if project_notice is not None:
+    st.sidebar.success(project_notice)
+if "_project_config_base" in st.session_state:
+    st.sidebar.caption(t("app.project.controls"))
 
 # The fallback file has no upload id. Hash it on every rerun so replacing or
 # removing it changes the staleness snapshot just like an uploaded input.
 fallback_path = inlayer.DEFAULT_INPUT
 fallback_hash = None
+fallback_full_hash = None
 fallback_read_error = None
 if not uploaded_files and os.path.isfile(fallback_path):
     try:
         fallback_hash = app_helpers.file_hash(fallback_path)
+        stat = os.stat(fallback_path)
+        cache_key = (fallback_hash, stat.st_mtime_ns, stat.st_size)
+        cached = st.session_state.get("_fallback_project_hash")
+        if cached is None or cached[0] != cache_key:
+            cached = (cache_key, inlayer_project.file_hash(fallback_path))
+            st.session_state["_fallback_project_hash"] = cached
+        fallback_full_hash = cached[1]
     except OSError as error:
         # An unavailable input marks old results stale; Generate reports why.
         fallback_read_error = error
@@ -258,8 +323,10 @@ _labels = dict(zip(
 
 stored = st.session_state.setdefault("fig_offsets_dict", {})
 # A removed upload takes its settings along; uploaded again, it starts fresh.
+exact_figure_fields = st.session_state.setdefault("_project_exact_figure_fields", {})
 for _gone in set(stored) - set(fig_ids):
     del stored[_gone]
+    exact_figure_fields.pop(_gone, None)
 for _fid in fig_ids:
     stored.setdefault(_fid, dict(app_helpers.FIGURE_DEFAULTS))
 
@@ -270,6 +337,46 @@ _labels[ALL_FIGURES] = t("app.all_figures")
 def _fig_label(fid: str) -> str:
     """Label of a figure option: sentinel translated, uploads by unique name."""
     return _labels.get(fid, fid)
+
+
+# Imported values live outside widget state; callbacks record deliberate edits.
+_CONFIG_WIDGET_FIELDS = {
+    "scale": "stl_unit_to_mm", "finger_enabled": "enable_finger_recesses",
+    "finger_axis": "finger_recess_axis", "finger_z_offset": "finger_recess_z_offset",
+    "parallel": "enable_parallel",
+}
+
+
+def _mark_config_edit(*fields: str):
+    if "_project_config_base" not in st.session_state:
+        return
+    widget_keys = {field: key for key, field in _CONFIG_WIDGET_FIELDS.items()}
+    edits = st.session_state.setdefault("_project_config_edits", {})
+    for field in fields:
+        edits[field] = st.session_state[widget_keys.get(field, field)]
+
+
+def _edit_select(key: str, widget_key: str):
+    st.session_state[key] = st.session_state[widget_key]
+    if key not in STEP_DEFAULTS:
+        _mark_config_edit(_CONFIG_WIDGET_FIELDS.get(key, key))
+
+
+def _edit_number(key: str, stored_key: str):
+    st.session_state[stored_key] = st.session_state[key]
+    _mark_config_edit(_CONFIG_WIDGET_FIELDS.get(key, key))
+
+
+def _edit_custom_box():
+    if "_project_config_base" not in st.session_state:
+        return
+    fields = ("box_diameter", "box_height") if st.session_state["box_shape"] == "cylinder" else (
+        "box_width", "box_depth", "box_height",
+    )
+    edits = st.session_state.setdefault("_project_config_edits", {})
+    for field in fields:
+        edits[field] = (st.session_state[f"_{field}_value"]
+                        if st.session_state["use_custom_box"] else None)
 
 
 def _select(label: str, labels: dict, key: str, default, **kwargs):
@@ -293,7 +400,7 @@ def _select(label: str, labels: dict, key: str, default, **kwargs):
         index=options.index(st.session_state[key]),
         format_func=lambda v: labels.get(v, str(v)),
         key=widget_key,
-        on_change=lambda: st.session_state.update({key: st.session_state[widget_key]}),
+        on_change=_edit_select, args=(key, widget_key),
         **kwargs,
     )
 
@@ -306,7 +413,7 @@ def _persistent_number(widget, label: str, key: str, default: float, **kwargs):
         st.session_state[key] = st.session_state[stored_key]
     value = widget(
         label, key=key,
-        on_change=lambda: st.session_state.update({stored_key: st.session_state[key]}),
+        on_change=_edit_number, args=(key, stored_key),
         **kwargs,
     )
     st.session_state[stored_key] = value
@@ -331,17 +438,15 @@ def _quantize_axis(axis: str, val: float) -> float:
 
 
 def _requantize_axes(axes: tuple[str, ...]):
-    """Snaps every stored value and every display key to the current step.
+    """Snap native edits and display projections, preserving exact imports.
 
-    Runs on every rerun, before the sliders exist: that keeps what the sliders
-    show and what the pipeline reads identical, and keeps each value inside
-    its slider's range whatever step it was stored with. Writing the display
-    keys on every run also keeps them while their section is hidden -
-    Streamlit only drops the state of a hidden widget that nothing set.
+    Writing display keys also keeps them while a widget section is hidden.
+    Imported axes only enter the normal snapping behavior after an axis edit.
     """
-    for offsets in stored.values():
+    for fid, offsets in stored.items():
         for axis in axes:
-            offsets[axis] = _quantize_axis(axis, offsets.get(axis, 0.0))
+            if axis not in exact_figure_fields.get(fid, set()):
+                offsets[axis] = _quantize_axis(axis, offsets.get(axis, 0.0))
     for axis in axes:
         if f"_sl_{axis}" in st.session_state:
             val = _quantize_axis(axis, st.session_state[f"_sl_{axis}"])
@@ -364,12 +469,20 @@ def _targets(sel_key: str) -> list[str]:
 
 def _load_axes(ref: str, axes: tuple[str, ...]):
     for axis in axes:
-        st.session_state[f"_sl_{axis}"] = stored[ref][axis]
-        st.session_state[f"_ni_{axis}"] = stored[ref][axis]
+        step_key = "rot_step" if axis in ROTATION_AXES else "pos_step"
+        step = float(st.session_state[step_key])
+        lo, hi = ((0.0, 360.0 - step) if axis in ROTATION_AXES else
+                  (-50.0, 150.0) if axis == "offset_z" else (-100.0, 100.0))
+        value = app_helpers.project_widget_value(stored[ref][axis], 0.0, lo, hi, step)
+        st.session_state[f"_sl_{axis}"] = value
+        st.session_state[f"_ni_{axis}"] = value
 
 
 def _load_recess(ref: str):
-    st.session_state[RECESS_POS_KEY] = int(round(stored[ref]["finger_recess_position"] * 100))
+    position = stored[ref]["finger_recess_position"] * 100
+    st.session_state[RECESS_POS_KEY] = int(app_helpers.project_widget_value(
+        position, 0, -100, 100, 5,
+    ))
 
 
 def _store_axis_value(axis: str, val: float):
@@ -380,6 +493,7 @@ def _store_axis_value(axis: str, val: float):
     st.session_state[f"_ni_{axis}"] = val
     for fid in _targets(app_helpers.selection_key(axis)):
         stored[fid][axis] = val
+        exact_figure_fields.get(fid, set()).discard(axis)
 
 
 def _sync_from_slider(axis: str):
@@ -395,6 +509,7 @@ def _store_recess_position():
     value = float(st.session_state[RECESS_POS_KEY]) / 100.0
     for fid in _targets(RECESS_SELECT):
         stored[fid]["finger_recess_position"] = value
+        exact_figure_fields.get(fid, set()).discard("finger_recess_position")
 
 
 _requantize_axes(OFFSET_AXES + ROTATION_AXES)
@@ -440,26 +555,32 @@ st.sidebar.markdown(t("app.printer.heading"))
 clearance = st.sidebar.slider(
     t("app.clearance.label"), min_value=0.1, max_value=2.0, step=0.1,
     value=inlayer.Config.clearance, help=t("app.clearance.help"), key="clearance",
+    on_change=_mark_config_edit, args=("clearance",),
 )
 wall_thickness = st.sidebar.slider(
     t("app.wall_thickness.label"), min_value=1.0, max_value=5.0, step=0.5,
     value=inlayer.Config.wall_thickness, help=t("app.wall_thickness.help"), key="wall_thickness",
+    on_change=_mark_config_edit, args=("wall_thickness",),
 )
 depth_fraction = st.sidebar.slider(
     t("app.depth_fraction.label"), min_value=0.3, max_value=1.0, step=0.05,
     value=inlayer.Config.depth_fraction, help=t("app.depth_fraction.help"), key="depth_fraction",
+    on_change=_mark_config_edit, args=("depth_fraction",),
 )
 voxel_pitch = st.sidebar.slider(
     t("app.voxel_pitch.label"), min_value=0.2, max_value=1.0, step=0.1,
     value=inlayer.Config.voxel_pitch, help=t("app.voxel_pitch.help"), key="voxel_pitch",
+    on_change=_mark_config_edit, args=("voxel_pitch",),
 )
 decimate_faces = st.sidebar.number_input(
     t("app.decimate_faces.label"), min_value=5000, max_value=50000, step=5000,
     value=inlayer.Config.decimate_faces, help=t("app.decimate_faces.help"), key="decimate_faces",
+    on_change=_mark_config_edit, args=("decimate_faces",),
 )
 scale = st.sidebar.number_input(
     t("app.scale.label"), min_value=0.01, max_value=100.0, step=0.1,
     value=inlayer.Config.stl_unit_to_mm, help=t("app.scale.help"), key="scale",
+    on_change=_mark_config_edit, args=("stl_unit_to_mm",),
 )
 
 # --- Finger recesses: position per figure -----------------------------------
@@ -467,7 +588,7 @@ enable_finger_recesses = st.sidebar.checkbox(
     t("app.finger.enable.label"),
     value=inlayer.Config.enable_finger_recesses,
     help=t("app.finger.enable.help"),
-    key="finger_enabled",
+    key="finger_enabled", on_change=_mark_config_edit, args=("enable_finger_recesses",),
 )
 finger_radius = inlayer.Config.finger_radius
 finger_recess_axis = inlayer.Config.finger_recess_axis
@@ -516,7 +637,7 @@ enable_parallel = st.sidebar.checkbox(
     t("app.parallel.label"),
     value=inlayer.Config.enable_parallel,
     help=t("app.parallel.help", workers=inlayer.MAX_PARALLEL_WORKERS),
-    key="parallel",
+    key="parallel", on_change=_mark_config_edit, args=("enable_parallel",),
 )
 
 st.sidebar.markdown("---")
@@ -527,7 +648,9 @@ box_shape = _select(
     inlayer.Config.box_shape,
     help=t("app.box.shape.help"),
 )
-use_custom_box = st.sidebar.checkbox(t("app.box.custom.label"), value=False, key="use_custom_box")
+use_custom_box = st.sidebar.checkbox(
+    t("app.box.custom.label"), value=False, key="use_custom_box", on_change=_edit_custom_box,
+)
 
 box_width = None
 box_depth = None
@@ -568,6 +691,7 @@ def _sync_gap(source: str):
     for key in GAP_KEYS:
         st.session_state[key] = val
     st.session_state["_gap_user_set"] = True
+    _mark_config_edit("figure_gap")
 
 
 # figure_gap only matters with several figures
@@ -680,11 +804,117 @@ if enable_manual_rotations:
     _axis_row("rot_y", t("app.rot_y.label"), 0.0, max_rot, rot_step, t("app.rot_y.help"))
     _axis_row("rot_z", t("app.rot_z.label"), 0.0, max_rot, rot_step, t("app.rot_z.help"))
 
-# The per-figure values the pipeline really uses - the run, the instant preview
-# and the staleness check all read these, never a slider.
-applied = app_helpers.applied_figure_params(
-    stored, fig_ids, enable_manual_offsets, enable_manual_rotations, enable_finger_recesses
+def _current_config() -> inlayer.Config:
+    """Exact imported configuration with only consciously edited fields replaced."""
+    config = inlayer.Config(
+        clearance=clearance,
+        wall_thickness=wall_thickness,
+        depth_fraction=depth_fraction,
+        voxel_pitch=voxel_pitch,
+        decimate_faces=decimate_faces,
+        stl_unit_to_mm=scale,
+        box_shape=box_shape,
+        box_width=box_width,
+        box_depth=box_depth,
+        box_height=box_height,
+        box_diameter=box_diameter,
+        figure_gap=figure_gap if st.session_state.get("_gap_user_set") else None,
+        layout_style=layout_style,
+        enable_finger_recesses=enable_finger_recesses,
+        finger_radius=finger_radius,
+        finger_recess_axis=finger_recess_axis,
+        finger_recess_z_offset=finger_recess_z_offset,
+        enable_parallel=enable_parallel,
+    )
+    original = st.session_state.get("_project_config_base")
+    if original is not None:
+        config = replace(original, **st.session_state.get("_project_config_edits", {}))
+    if not enable_manual_offsets:
+        config = replace(config, offset_x=0.0, offset_y=0.0, offset_z=0.0)
+    return config
+
+
+# Every caller, including preparation caches and the instant preview, uses the
+# exact configuration rather than the editable widget projections above.
+config = _current_config()
+clearance, wall_thickness = config.clearance, config.wall_thickness
+depth_fraction, voxel_pitch = config.depth_fraction, config.voxel_pitch
+decimate_faces, scale = config.decimate_faces, config.stl_unit_to_mm
+box_shape = config.box_shape
+box_width, box_depth, box_height, box_diameter = (
+    config.box_width, config.box_depth, config.box_height, config.box_diameter,
 )
+figure_gap, layout_style = config.figure_gap, config.layout_style
+enable_finger_recesses, enable_parallel = config.enable_finger_recesses, config.enable_parallel
+finger_radius, finger_recess_axis, finger_recess_z_offset = (
+    config.finger_radius, config.finger_recess_axis, config.finger_recess_z_offset,
+)
+
+# Globals and individual offsets combine only here; the recipe stores them
+# separately and build_inlay consumes the combined offsets unchanged.
+applied = app_helpers.applied_figure_params(
+    stored, fig_ids, enable_manual_offsets, enable_manual_rotations, enable_finger_recesses,
+    (config.offset_x, config.offset_y, config.offset_z),
+)
+
+
+def _project_config() -> inlayer.Config:
+    """Retain hidden choices as well as exact imported project values."""
+    config = _current_config()
+    if "_project_config_base" in st.session_state:
+        return config
+    return replace(
+        config,
+        figure_gap=float(st.session_state["figure_gap"])
+        if st.session_state.get("_gap_user_set") else None,
+        layout_style=st.session_state.get("layout_style", config.layout_style),
+    )
+
+
+def _project_json() -> str | None:
+    """Serialize current inputs without ever embedding their STL bytes."""
+    sources = []
+    if uploaded_files:
+        project_ids = st.session_state.setdefault("_project_id_by_file_id", {})
+        for gone in set(project_ids) - set(fig_ids):
+            del project_ids[gone]
+        for file_id in fig_ids:
+            project_ids.setdefault(file_id, str(uuid.uuid4()))
+        figure_ids = [project_ids[file_id] for file_id in fig_ids]
+        sources = [
+            inlayer_project.SourceIdentity(uf.name, project_hashes[uf.file_id])
+            for uf in uploaded_files
+        ]
+    elif fallback_full_hash is not None:
+        figure_ids = [st.session_state.setdefault("_fallback_project_id", str(uuid.uuid4()))]
+        sources = [inlayer_project.SourceIdentity(fallback_path, fallback_full_hash)]
+    else:
+        return None
+    raw = app_helpers.applied_figure_params(
+        stored, fig_ids, enable_manual_offsets, enable_manual_rotations, True,
+    )
+    recipe = inlayer_project.new_project(
+        _project_config(), sources,
+        rotations=[values["rotation"] for values in raw],
+        offsets=[values["offset"] for values in raw],
+        recess_positions=[values["recess_position"] for values in raw],
+        figure_ids=figure_ids,
+    )
+    return inlayer_project.dumps_project(recipe)
+
+
+project_json = _project_json() if project_error is None else None
+if project_json is None:
+    st.session_state.pop("_project_export", None)
+else:
+    st.session_state["_project_export"] = project_json
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(t("app.project.heading"))
+    st.sidebar.download_button(
+        label=t("app.project.download"), data=project_json,
+        file_name="inlay-project.json", mime="application/json",
+        help=t("app.project.download.help"), key="project_download",
+    )
 
 
 def _params_snapshot() -> dict:
@@ -730,6 +960,9 @@ with col_right:
 # --- Pipeline ---------------------------------------------------------------
 if run_btn:
     st.session_state.pop("result", None)
+    if project_error is not None:
+        st.error(project_error)
+        st.stop()
     tmp_paths: list[str] = []
     try:
         # Input: the uploads, or the default file next to the app
@@ -765,26 +998,7 @@ if run_btn:
         logger = StreamlitLogger(status_box)
         t_start = time.perf_counter()
 
-        config = inlayer.Config(
-            clearance=clearance,
-            wall_thickness=wall_thickness,
-            depth_fraction=depth_fraction,
-            voxel_pitch=voxel_pitch,
-            decimate_faces=decimate_faces,
-            stl_unit_to_mm=scale,
-            box_shape=box_shape,
-            box_width=box_width,
-            box_depth=box_depth,
-            box_height=box_height,
-            box_diameter=box_diameter,
-            figure_gap=figure_gap,
-            layout_style=layout_style,
-            enable_finger_recesses=enable_finger_recesses,
-            finger_radius=finger_radius,
-            finger_recess_axis=finger_recess_axis,
-            finger_recess_z_offset=finger_recess_z_offset,
-            enable_parallel=enable_parallel,
-        )
+        config = _current_config()
 
         progress = st.progress(0, text=t("app.progress.start"))
         rotations = [a["rotation"] for a in applied]

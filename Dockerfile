@@ -26,7 +26,7 @@ FROM base AS test
 
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
-COPY pytest.ini inlayer.py app.py app_helpers.py i18n.py ./
+COPY pytest.ini inlayer.py inlayer_project.py app.py app_helpers.py i18n.py ./
 COPY tests/ ./tests/
 # tests/test_streamlit_config.py reads all of these: the config whose theme and
 # upload limit it pins down, the Dockerfile itself to verify the runtime
@@ -39,14 +39,13 @@ COPY Dockerfile compose.yaml ./
 RUN python -m pytest -q
 
 
-# --- Laufzeit ---------------------------------------------------------------
+# --- Runtime ---------------------------------------------------------------
 FROM base AS runtime
 
-# Anwendungscode kopieren
-COPY inlayer.py app.py app_helpers.py i18n.py ./
-# Streamlit-Konfiguration: das Custom-CSS in app.py ist auf das dunkle Theme
-# ausgelegt. Ohne diese Datei faellt der Container auf das helle Standard-Theme
-# zurueck und Sidebar-Beschriftungen werden unlesbar.
+# Copy application modules explicitly, including the shared project format.
+COPY inlayer.py inlayer_project.py app.py app_helpers.py i18n.py ./
+# The custom CSS in app.py expects this dark theme. Omitting the configuration
+# falls back to the light theme and makes sidebar labels unreadable.
 COPY .streamlit/ ./.streamlit/
 
 # Nicht als root laufen: der Container haengt am offenen Port und verarbeitet

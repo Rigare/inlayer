@@ -123,7 +123,7 @@ def test_no_deprecated_use_container_width_api():
     Streamlit warns on every session start and drops the parameter in an
     upcoming release; a regression would otherwise only surface in the log.
     """
-    sources = ["app.py", "app_helpers.py", "i18n.py", "inlayer.py"]
+    sources = ["app.py", "app_helpers.py", "i18n.py", "inlayer.py", "inlayer_project.py"]
     hits = [
         name for name in sources
         if "use_container_width" in (_REPO_ROOT / name).read_text(encoding="utf-8")

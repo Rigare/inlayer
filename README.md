@@ -197,6 +197,7 @@ The web app is a full GUI with live preview:
 |---|---|
 | 🌍 **English / German** | Switch the interface language in the sidebar at any time |
 | 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI; replacing or removing that file marks an earlier result as out of date |
+| 💾 **Project recipes** | Download and reopen versioned JSON with all settings, stable figure identities and full source hashes. Upload the JSON **and the original STLs** to reopen it; STL bytes are not embedded |
 | 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. This lightweight preview can show flat surfaces; *Generate* checks whether a model can form a solid. After a run the viewer shows that result until you generate again; if settings or inputs have changed since, a warning says it is out of date |
 | 🧩 **Auto arrangement** | Multiple figures are placed without collisions (`compact` / `horizontal` / `vertical`) with an adjustable gap — it follows the wall thickness until you set it yourself |
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
@@ -251,6 +252,15 @@ python inlayer.py -i fig1.stl fig2.stl -o inlay.stl --finger-recesses --finger-r
 # Process several figures in parallel across CPU cores
 python inlayer.py -i fig1.stl fig2.stl fig3.stl -o inlay.stl --parallel
 
+# Save a versioned project recipe together with the inlay
+python inlayer.py -i fig1.stl fig2.stl -o inlay.stl --save-project project.json
+
+# Reopen it after a restart; stored source paths are relative to the JSON
+python inlayer.py --project project.json -o reopened.stl
+
+# Reopen a recipe downloaded from the web by supplying the original STLs
+python inlayer.py --project project.json -i fig1.stl fig2.stl -o reopened.stl
+
 # German output
 python inlayer.py --lang de -i figure.stl -o inlay.stl
 
@@ -267,12 +277,61 @@ you can inspect it.
 |---|---|
 | `0` | Inlay written, wall check passed |
 | `1` | The run failed — an unreadable STL, a voxel grid too large for the resolution, a box too small to leave any material, not enough memory. One line on stderr says which; no inlay is written |
-| `2` | Invalid arguments (argparse usage error), an input file that does not exist or an output path that cannot be written — nothing was computed |
+| `2` | Invalid arguments, an unreadable/incompatible project, a missing or changed source, or an output path that cannot be written — nothing was computed |
 | `3` | Inlay written, but the wall check found problems |
 
 All `--finger-recess-position` values are validated while parsing. Their count
 (one, or one per `-i` file) only matters with `--finger-recesses`; without it
 the positions have no effect and a note says so.
+
+### Versioned project recipes (JSON)
+
+The web app's **Download project as JSON** button and the CLI's
+`--save-project PATH` write the same format: `format: "inlayer-project"`,
+`version: 1`. A recipe contains every `Config` field and, for each figure, a
+stable UUID, its rotation, individual offset and grip position, plus a source
+name, an optional path and the **full SHA-256 hash of the source bytes**. The
+persistent figure id is independent of a Streamlit upload id, file name or
+upload order. Two files both named `model.stl` therefore remain separate when
+their content differs.
+
+**A recipe is not an archive:** it contains no STL bytes and is not a ZIP file.
+To reopen a project in the web app, upload its JSON and exactly one original
+STL per project figure. The app checks every hash immediately; missing,
+changed or additional sources and invalid recipes are reported in the
+sidebar, and *Generate* cannot start until the inputs match. Sources are then
+put into project order by content hash, never by name. The same recipe can be
+exported again with the same stable ids. Imported settings are retained exactly,
+including values outside the ordinary controls and disabled finger-recess settings.
+The controls show an editable approximation where necessary; only an explicit
+edit replaces the corresponding imported value. Disabling manual offsets or
+rotations exports their effective zero values, so reopening matches the web run.
+
+For the CLI, relative source paths are resolved from the **recipe's directory**,
+not the process's working directory. Web exports deliberately have no local
+paths, so pass their original STLs with `-i` when opening them in the CLI.
+Explicit `-i` paths can be in any order and are matched by hash. All sources
+are verified before the first pipeline step. With `--project`, configuration,
+rotation, offset and finger flags cannot silently override the recipe; only
+`-i`, `-o`, `--save-project` and `--lang` may be added.
+The `--save-project` destination must differ from every STL input and the STL
+output; overwriting the opened JSON recipe itself is allowed.
+
+A figure's `offset` is its individual addition to `config.offset_x/y/z` and is
+applied exactly once. Imported global and individual offsets remain separate
+in exported recipes; the web controls edit each figure's individual addition.
+
+Version 1 is strict: malformed JSON, missing or unknown fields, invalid hashes
+and unsupported versions fail with a readable error instead of a best-guess
+import. Web and CLI accept the same valid recipe values, including fractional
+rotations, offsets and grip positions and values beyond the usual web controls.
+Box and cylinder dimensions can be independently fixed or automatic (`null`):
+for example, a fixed height with automatic width and depth stays that way in
+the web app and its exports. An automatic figure gap (`null`) keeps following
+the wall thickness after export and reopening. Existing source checks, upload
+limits and voxel-grid resource checks still apply. Reopening a project preserves
+the computed geometry and wall findings within normal
+floating-point tolerances; STL byte-for-byte equality is not required.
 
 ---
 
@@ -528,7 +587,7 @@ value as a usage error before any work starts.
 - **Language and threads:** the selected language lives in a `ContextVar`, not a module global, so two Streamlit sessions cannot overwrite each other's choice. `ThreadPoolExecutor` workers start with a fresh context and do *not* inherit it — `_parallel_map` therefore captures the language and re-applies it inside each worker, otherwise parallel steps would log in the default language.
 - **Measured, not predicted:** `build_inlay` solidifies every figure first and then arranges and dimensions the box from those real cavities. Voxelisation shifts a cavity by up to half a `voxel_pitch` depending on where it lies on the grid, so every box sized from a predicted allowance was off by that much: side walls came out 1.75–2.4 mm and floors 2.2–2.6 mm for a 2 mm target, and the wall between two cavities `figure_gap − voxel_pitch`. Now side and floor walls are `wall_thickness` and the wall between cavities is `figure_gap` — the invariant tests measure exactly that. At identical settings boxes can therefore come out slightly smaller or larger than before.
 - **Box height:** every figure sinks `depth_fraction` of its own height below the top face, wherever its STL sits in Z. The floor is `wall_thickness` under the deepest cavity; shorter figures sit on a thicker floor. Previously all figures were aligned at their tops against the tallest one — a short figure next to a tall one got no pocket at all, and two figures at different Z origins produced a solid block.
-- **Rotation and layout:** the layout uses the rotated figures, so rotated cavities never overlap; the web app uses the unrotated figures only to keep the *order* stable while you rotate. Previously the slots came from the unrotated figures and a rotation could merge two cavities.
+- **Rotation and layout:** the layout uses the rotated figures, so rotated cavities never overlap; the web app and CLI use the unrotated figures only to keep the *order* stable while you rotate. Both entry points therefore arrange the same recipe identically. Previously the slots came from the unrotated figures and a rotation could merge two cavities.
 - **Manual offsets** move a figure inside a box that stays put; walls made too thin that way are reported by the check.
 - **Cavities stay open:** each cavity is extruded up through the top face. With `depth_fraction = 1.0` and a negative Z offset the pocket used to close at the top — a sealed void in the print.
 - **Repair only when needed:** `prepare_figure` skips `pymeshfix` when the loaded mesh is already watertight **and** consistently wound — the normal case for cleanly exported STLs. That halves the step's runtime (measured 1.99 s → 1.08 s at 82k triangles) and does not change the geometry. Watertightness alone is not a sufficient criterion: a mesh with inverted faces is watertight but would corrupt the subsequent voxel fill. When the repair does run, it keeps **every** shell of the file: pymeshfix's default drops all but the shell with the most triangles, so a miniature with a separate base used to lose the base as soon as the file had a single hole anywhere.
