@@ -72,6 +72,24 @@ python inlayer.py -i fig1.stl fig2.stl fig3.stl -o inlay.stl
 > **Note:** Python 3.14 is not supported yet — `manifold3d` and `pymeshfix`
 > have no wheels for it.
 
+### Dependency security baseline
+
+The runtime pins **Streamlit 1.66.1** and its otherwise transitive **Pillow
+13.0.0** dependency together. Pillow 13.0.0 fixes the OSV findings reported for
+12.3.0. Streamlit 1.62.0 through 1.66.0 require `pillow<13`, so do not combine
+the Pillow pin with an older Streamlit version or force-install either package.
+
+After changing dependencies, recreate the Python 3.13 environment and record
+the actual direct and transitive resolution rather than relying on the pins
+alone:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pip check
+python -m pip show streamlit pillow
+python -m pip freeze
+```
+
 ### 🌍 Language
 
 The interface speaks English and German. English is the default.
@@ -196,15 +214,15 @@ The web app is a full GUI with live preview:
 | Feature | Description |
 |---|---|
 | 🌍 **English / German** | Switch the interface language in the sidebar at any time |
-| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI |
-| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. After a run the viewer shows that result until you generate again; if settings or uploads have changed since, a warning says it is out of date |
+| 📂 **File upload** | Upload one or **several** STL models straight from the sidebar. Without an upload, *Generate* takes a `figure.stl` from the working directory, like the CLI; replacing or removing that file marks an earlier result as out of date |
+| 🪞 **Instant preview** | Uploaded figures appear in the 3D viewer immediately, rotations update live — without running the pipeline. This lightweight preview can show flat surfaces; *Generate* checks whether a model can form a solid. After a run the viewer shows that result until you generate again; if settings or inputs have changed since, a warning says it is out of date |
 | 🧩 **Auto arrangement** | Multiple figures are placed without collisions (`compact` / `horizontal` / `vertical`) with an adjustable gap — it follows the wall thickness until you set it yourself |
 | 🎚️ **Interactive parameters** | Clearance, wall thickness, insert depth and voxel resolution via sliders |
 | 🎯 **Manual positioning** | Move each figure (or all of them together) in X/Y/Z inside the box, in steps of 1, 5 or 10 mm |
 | 🔄 **Manual rotation** | Rotate each figure (or all of them together) about X/Y/Z, in steps of 1, 5, 10 or 45° |
-| 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis and depth; the position along the figure is set **per figure**) |
+| 🖐️ **Finger recesses** | Optional hemispherical cut-outs beside each figure as a removal aid (adjustable radius, axis and depth; the position along the figure is set **per figure**). Settings survive switching recesses off and on |
 | ⚡ **Multi-threading** | Optionally process several figures in parallel across CPU cores (checkbox in the sidebar) |
-| 📐 **Box overrides** | Optionally force fixed box dimensions |
+| 📐 **Box overrides** | Optionally force fixed box dimensions; dimensions survive switching overrides off and on or changing the box shape |
 | 🧷 **Settings per file** | Offsets, rotations and grip positions belong to each upload — two files with the same name appear as `model.stl` and `model.stl (2)` and are positioned separately; a removed file takes its settings along |
 | 🔍 **Wall check** | Every wall is measured on the finished geometry — sides, floor and the walls between cavities; each finding names its figure |
 | 👁️ **3D preview** | Interactive Plotly viewer (rotate, zoom, show/hide) |

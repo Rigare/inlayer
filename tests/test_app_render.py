@@ -14,6 +14,7 @@ import ast
 import base64
 import json
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -36,7 +37,7 @@ def _run(lang: str) -> AppTest:
 
 
 def _stl(extents) -> bytes:
-    return trimesh.creation.box(extents=extents).export(file_type="stl")
+    return cast(bytes, trimesh.creation.box(extents=extents).export(file_type="stl"))
 
 
 def _upload(at: AppTest, files: list[tuple[str, bytes]]) -> AppTest:
@@ -53,7 +54,7 @@ def _checkbox(at: AppTest, key: str):
 
 def _warned(at: AppTest, key: str) -> bool:
     """Whether a warning with that text is shown (Streamlit strips a leading emoji)."""
-    text = i18n.TRANSLATIONS[key][i18n.get_language()]
+    text = i18n.TRANSLATIONS[key][at.session_state["ui_lang"]]
     return any(w.value.strip() and w.value.strip() in text for w in at.warning)
 
 
@@ -84,21 +85,39 @@ class TestUploadRobustness:
         assert any("nan.stl" in w.value for w in at.warning)
         assert list(_trace_extents(at)) == ["a.stl"]
 
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_flat_surface_is_drawn_without_validating_a_solid(self, lang):
+        """The lightweight preview can draw a sheet; generation validates solids."""
+        triangles = np.array([
+            [[0, 0, 0], [10, 0, 0], [10, 10, 0]],
+            [[0, 0, 0], [10, 10, 0], [0, 10, 0]],
+        ])
+        transform = trimesh.transformations.rotation_matrix(np.pi / 4, [1, 1, 1])
+        rotated = trimesh.transformations.transform_points(triangles.reshape(-1, 3), transform)
+        sheet = binary_stl(rotated.reshape(-1, 3, 3))
+        at = _upload(_run(lang), [("a.stl", _stl([10, 10, 10])), ("sheet.stl", sheet)])
+        assert not at.warning
+        assert list(_trace_extents(at)) == ["a.stl", "sheet.stl"]
+
 
 class TestFailedRun:
     """A run that fails says which upload it failed on."""
 
-    # Previews fine, but is no solid: the pipeline refuses it
+    # A flat sheet can be previewed, but cannot be repaired into a solid.
     SHEET = binary_stl([[[0, 0, 0], [10, 0, 0], [10, 10, 0]], [[0, 0, 0], [10, 10, 0], [0, 10, 0]]])
 
-    def test_error_names_the_upload_not_its_temp_file(self):
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_error_names_the_upload_not_its_temp_file(self, lang):
         """The run reads uploads from temporary files and the message named
         those: "/tmp/tmpk3x9.stl contains no triangles" - which of two uploads?"""
-        at = _upload(_run("en"), [("good.stl", _stl([10, 10, 10])), ("sheet.stl", self.SHEET)])
+        at = _upload(_run(lang), [("good.stl", _stl([10, 10, 10])), ("sheet.stl", self.SHEET)])
+        assert not at.warning
+        assert list(_trace_extents(at)) == ["good.stl", "sheet.stl"]
         _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
         at.button[0].click().run()
         (message,) = [e.value for e in at.error]
-        assert "sheet.stl has no volume" in message
+        expected = i18n.TRANSLATIONS["error.not_solid"][lang].format(name="sheet.stl")
+        assert expected in message
         assert "tmp" not in message
         # The message is the whole story - no stack trace below it
         assert not at.exception
@@ -182,6 +201,106 @@ class TestRunWithoutUpload:
         assert at.session_state["result"]["file_names"] == ["figure.stl"]
         assert (tmp_path / "figure.stl").exists()  # only temporary upload files are cleaned up
 
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_fallback_change_and_removal_mark_result_stale(self, lang, tmp_path, monkeypatch):
+        """The actual fallback input belongs in the freshness snapshot."""
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / "figure.stl"
+        path.write_bytes(_stl([10, 10, 10]))
+        at = _run(lang)
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        assert not at.exception and not at.error
+        result = at.session_state["result"]
+        old_extent = result["fig_viz"][0].extents[0]
+        old_hash = app_helpers.file_hash(str(path))
+        assert result["params"]["files"] == [("figure.stl", old_hash)]
+        assert not _warned(at, "app.results.stale")
+
+        path.write_bytes(_stl([20, 10, 10]))
+        new_hash = app_helpers.file_hash(str(path))
+        assert new_hash != old_hash
+        at.run()
+        assert _warned(at, "app.results.stale")
+        assert at.session_state["result"]["params"]["files"] == [("figure.stl", old_hash)]
+
+        at.button[0].click().run()
+        assert not at.exception and not at.error
+        result = at.session_state["result"]
+        assert result["params"]["files"] == [("figure.stl", new_hash)]
+        assert result["fig_viz"][0].extents[0] == pytest.approx(old_extent + 10.0)
+        assert not _warned(at, "app.results.stale")
+
+        path.unlink()
+        at.run()
+        assert not at.exception
+        assert _warned(at, "app.results.stale")
+        assert at.session_state["result"]["params"]["files"] == [("figure.stl", new_hash)]
+        at.button[0].click().run()
+        assert not at.exception
+        assert [e.value for e in at.error] == [
+            i18n.TRANSLATIONS["app.error.no_input"][lang].format(path="figure.stl")
+        ]
+        assert "result" not in at.session_state
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_upload_supersedes_fallback_and_ignores_its_changes(self, lang, tmp_path, monkeypatch):
+        """An uploaded figure.stl is independent of the same-named fallback file."""
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / "figure.stl"
+        path.write_bytes(_stl([10, 10, 10]))
+        at = _run(lang)
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        fallback_extent = at.session_state["result"]["fig_viz"][0].extents[0]
+
+        upload = _stl([20, 10, 10])
+        _upload(at, [("figure.stl", upload)])
+        assert _warned(at, "app.results.stale")
+        at.button[0].click().run()
+        assert not at.exception and not at.error
+        result = at.session_state["result"]
+        assert result["params"]["files"] == [("figure.stl", app_helpers.bytes_hash(upload))]
+        assert result["fig_viz"][0].extents[0] == pytest.approx(fallback_extent + 10.0)
+        assert not _warned(at, "app.results.stale")
+
+        path.write_bytes(_stl([30, 10, 10]))
+        at.run()
+        assert not at.exception
+        assert not _warned(at, "app.results.stale")
+        path.unlink()
+        at.run()
+        assert not at.exception
+        assert not _warned(at, "app.results.stale")
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_unreadable_fallback_marks_result_stale_and_reports_run_error(
+        self, lang, tmp_path, monkeypatch
+    ):
+        """Read errors during freshness checks must not abort an ordinary rerender."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "figure.stl").write_bytes(_stl([10, 10, 10]))
+        at = _run(lang)
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+        at.button[0].click().run()
+        old_files = at.session_state["result"]["params"]["files"]
+
+        def unreadable(_path):
+            raise PermissionError("fallback read denied")
+
+        monkeypatch.setattr(app_helpers, "file_hash", unreadable)
+        at.run()
+        assert not at.exception
+        assert _warned(at, "app.results.stale")
+        assert at.session_state["result"]["params"]["files"] == old_files
+
+        at.button[0].click().run()
+        assert not at.exception
+        assert [e.value for e in at.error] == [
+            i18n.TRANSLATIONS["app.error.failed"][lang].format(error="fallback read denied")
+        ]
+        assert "result" not in at.session_state
+
 
 class TestCacheIdentity:
     """Process-wide caches are keyed by content, never by name and size."""
@@ -203,6 +322,126 @@ class TestCacheIdentity:
         assert not _warned(at, "app.results.stale")
         _upload(at, [("model.stl", _stl([20, 5, 5]))])
         assert _warned(at, "app.results.stale")
+
+
+class TestHiddenNumericValues:
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    @pytest.mark.parametrize(
+        "kind,key,toggle,value",
+        [
+            ("slider", "finger_radius", "finger_enabled", 12.0),
+            ("slider", "finger_z_offset", "finger_enabled", 7.0),
+            ("number_input", "box_width", "use_custom_box", 75.0),
+            ("number_input", "box_depth", "use_custom_box", 65.0),
+            ("number_input", "box_height", "use_custom_box", 30.0),
+            ("number_input", "box_diameter", "use_custom_box", 80.0),
+        ],
+    )
+    def test_edit_and_hide_in_one_rerun_preserves_value(self, lang, kind, key, toggle, value):
+        """An edit must persist even when the same event batch hides its widget."""
+        at = _run(lang)
+        if key == "box_diameter":
+            _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        _widget(at, "checkbox", toggle).check().run()
+        _widget(at, kind, key).set_value(value)
+        _widget(at, "checkbox", toggle).uncheck().run()
+        assert not at.exception
+        assert at.session_state[f"_{key}_value"] == value
+        _widget(at, "checkbox", toggle).check().run()
+        assert not at.exception
+        assert _widget(at, kind, key).value == value
+
+    @pytest.mark.parametrize("lang", sorted(i18n.LANGUAGES))
+    def test_values_survive_hiding_and_shape_changes_and_reach_config(self, lang, monkeypatch):
+        """Optional numeric controls must keep their values and use them on a run."""
+        at = _upload(_run(lang), [("cube.stl", _stl([10, 10, 10]))])
+        _widget(at, "checkbox", "finger_enabled").check().run()
+        _widget(at, "slider", "finger_radius").set_value(12.0).run()
+        _widget(at, "slider", "finger_z_offset").set_value(7.0).run()
+        _widget(at, "selectbox", "_w_finger_axis").set_value("y").run()
+
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        _widget(at, "number_input", "box_width").set_value(75.0).run()
+        _widget(at, "number_input", "box_depth").set_value(65.0).run()
+        _widget(at, "number_input", "box_height").set_value(30.0).run()
+        other_lang = next(code for code in i18n.LANGUAGES if code != lang)
+        _widget(at, "selectbox", "ui_lang").set_value(other_lang).run()
+        assert not at.exception
+        assert _widget(at, "slider", "finger_radius").value == 12.0
+        assert _widget(at, "slider", "finger_z_offset").value == 7.0
+        assert _widget(at, "number_input", "box_width").value == 75.0
+        assert _widget(at, "number_input", "box_depth").value == 65.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        _widget(at, "number_input", "box_diameter").set_value(80.0).run()
+        _widget(at, "selectbox", "_w_box_shape").set_value("box").run()
+        assert _widget(at, "number_input", "box_width").value == 75.0
+        assert _widget(at, "number_input", "box_depth").value == 65.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        assert _widget(at, "number_input", "box_diameter").value == 80.0
+        _widget(at, "selectbox", "_w_box_shape").set_value("box").run()
+
+        captured = []
+
+        def capture_config(_figures, config, **_kwargs):
+            captured.append(config)
+            raise ValueError("config captured")
+
+        monkeypatch.setattr(inlayer, "build_inlay", capture_config)
+        _widget(at, "slider", "voxel_pitch").set_value(1.0).run()
+
+        def run_config():
+            at.button[0].click().run()
+            assert not at.exception
+            assert len(captured) == 1
+            return captured.pop()
+
+        _widget(at, "checkbox", "finger_enabled").uncheck().run()
+        _widget(at, "checkbox", "use_custom_box").uncheck().run()
+        _widget(at, "selectbox", "ui_lang").set_value(lang).run()
+        assert not at.exception
+        assert at.session_state["_finger_radius_value"] == 12.0
+        assert at.session_state["_finger_z_offset_value"] == 7.0
+        assert at.session_state["_box_width_value"] == 75.0
+        assert at.session_state["_box_depth_value"] == 65.0
+        assert at.session_state["_box_height_value"] == 30.0
+        assert at.session_state["_box_diameter_value"] == 80.0
+        config = run_config()
+        assert config.enable_finger_recesses is False
+        assert (config.finger_radius, config.finger_recess_axis, config.finger_recess_z_offset) == (
+            inlayer.Config.finger_radius, inlayer.Config.finger_recess_axis,
+            inlayer.Config.finger_recess_z_offset,
+        )
+        assert (config.box_width, config.box_depth, config.box_height, config.box_diameter) == (
+            None, None, None, None,
+        )
+        _widget(at, "checkbox", "finger_enabled").check().run()
+        _widget(at, "checkbox", "use_custom_box").check().run()
+        assert _widget(at, "slider", "finger_radius").value == 12.0
+        assert _widget(at, "slider", "finger_z_offset").value == 7.0
+        assert _widget(at, "selectbox", "_w_finger_axis").value == "y"
+        assert _widget(at, "number_input", "box_width").value == 75.0
+        assert _widget(at, "number_input", "box_depth").value == 65.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+
+        config = run_config()
+        assert config.enable_finger_recesses is True
+        assert (config.finger_radius, config.finger_recess_axis, config.finger_recess_z_offset) == (12.0, "y", 7.0)
+        assert (config.box_shape, config.box_width, config.box_depth, config.box_height) == (
+            "box", 75.0, 65.0, 30.0,
+        )
+        assert config.box_diameter is None
+
+        _widget(at, "selectbox", "_w_box_shape").set_value("cylinder").run()
+        assert _widget(at, "number_input", "box_diameter").value == 80.0
+        assert _widget(at, "number_input", "box_height").value == 30.0
+        config = run_config()
+        assert config.enable_finger_recesses is True
+        assert (config.finger_radius, config.finger_recess_axis, config.finger_recess_z_offset) == (12.0, "y", 7.0)
+        assert (config.box_shape, config.box_diameter, config.box_height) == ("cylinder", 80.0, 30.0)
+        assert (config.box_width, config.box_depth) == (None, None)
 
 
 class TestRotationStepSurvivesHiding:

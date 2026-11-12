@@ -212,6 +212,19 @@ class TestLoadPreviewMesh:
         out = app_helpers.load_preview_mesh(data, 1.0, "box.stl")
         assert len(out.faces) < len(sphere.faces)
 
+    @pytest.mark.parametrize("angle", [0.0, np.pi / 4])
+    def test_flat_surface_can_be_previewed(self, angle):
+        """Preview checks usable area; generation decides whether it forms a solid."""
+        sheet = trimesh.Trimesh(
+            vertices=[[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]],
+            faces=[[0, 1, 2], [0, 2, 3]],
+        )
+        sheet.apply_transform(trimesh.transformations.rotation_matrix(angle, [1, 1, 1]))
+        data = cast(bytes, sheet.export(file_type="stl"))
+        out = app_helpers.load_preview_mesh(data, 1.0, "sheet.stl")
+        assert len(out.faces) == 2
+        assert out.area == pytest.approx(100.0)
+
     @pytest.mark.parametrize(
         "data",
         [b"", bytes(84), b"solid x\nendsolid x\n", bytes(range(256)) * 2,
