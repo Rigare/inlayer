@@ -479,7 +479,12 @@ value as a usage error before any work starts.
 > to the top face, so it stays open and prints without an overhang.
 
 > The recesses are placed where the figure is widest at the grip position (across
-> the recess axis). The width of that search band scales with `voxel_pitch`
+> the recess axis) — measured only on the part that is actually sunk below the
+> box's top face, after the figure's own Z offset. Whatever stands out above the
+> box leaves no cavity, so an overhanging top (a mushroom head, a wide cap on a
+> narrow stem) does not pull the recesses away from the pocket they are meant to
+> open up. The grip position (below) is relative to that sunk part as well. The
+> width of that search band scales with `voxel_pitch`
 > (`FINGER_BAND_VOXELS`, at least `FINGER_BAND_MIN_MM`), so the position is not
 > made noisy by voxel discretisation at coarse resolutions.
 

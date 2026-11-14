@@ -779,24 +779,34 @@ def _recess_template(config: Config) -> trimesh.Trimesh:
 
 
 def _recess_pair(
-    fig: trimesh.Trimesh, template: trimesh.Trimesh, config: Config, position: float
+    fig: trimesh.Trimesh, template: trimesh.Trimesh, config: Config, position: float,
+    top_z: float = 0.0,
 ) -> list[trimesh.Trimesh]:
     """The two recesses of one figure, beside it at the grip position.
 
-    Expects the figure in build_inlay's frame (box top at z = 0). The recesses
-    sit on the figure's real silhouette at the grip position, along
-    finger_recess_axis ("x": thumb and fingers from the sides, "y": front and
-    back). `position` slides the pair along the figure, relative to its usable
-    half length (half extent minus finger_radius), so one value fits figures of
-    any size; a figure shorter than 2 * finger_radius keeps them centred.
+    Expects the figure in build_inlay's frame, where the box's top face lies at
+    z = `top_z` (0 unless the figure's own Z offset moves it afterwards). The
+    recesses sit on the silhouette of the part that is actually sunk below the
+    top face, at the grip position, along finger_recess_axis ("x": thumb and
+    fingers from the sides, "y": front and back). Only that part leaves a
+    cavity: a wide head standing out above the box used to pull the recesses
+    away from a narrow sunk stem, leaving them as separate holes.
+    `position` slides the pair along the figure, relative to its usable half
+    length (half extent minus finger_radius), so one value fits figures of any
+    size; a figure shorter than 2 * finger_radius keeps them centred.
     """
     axis = 0 if config.finger_recess_axis == "x" else 1
     cross = 1 - axis
-    fb = fig.bounds
+    verts = fig.vertices
+    sunk = verts[verts[:, 2] <= top_z]
+    # A figure raised out of the box entirely has no cavity to hug; the wall
+    # check reports that, the recesses fall back to the whole figure.
+    if len(sunk):
+        verts = sunk
+    fb = np.array([verts.min(axis=0), verts.max(axis=0)])
     half_span = max(0.0, (fb[1][cross] - fb[0][cross]) / 2.0 - config.finger_radius)
     grip = float(fb.mean(axis=0)[cross] + position * half_span)
 
-    verts = fig.vertices
     near = verts[np.abs(verts[:, cross] - grip) < _finger_band(config.voxel_pitch)]
     # An empty band is possible where the figure has a gap at the grip position
     edges = (near[:, axis].min(), near[:, axis].max()) if len(near) else (fb[0][axis], fb[1][axis])
@@ -1015,7 +1025,9 @@ def build_inlay(
         template = _recess_template(config)
         for i in range(n):
             position = entry(individual_recess_positions, i, config.finger_recess_position)
-            recesses[i] = _recess_pair(local[i], template, config, position)
+            # The Z offset moves the figure, not the box: the part that ends
+            # up below the top face lies below -offset_z in this frame.
+            recesses[i] = _recess_pair(local[i], template, config, position, top_z=-offsets[i][2])
 
     # Everything cut per figure, before the manual offsets: layout and box
     # are measured on these.
